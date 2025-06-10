@@ -1,7 +1,12 @@
 import gleam/dict
 import gleam/erlang/process.{type Subject}
+import gleam/int
+import gleam/option
+import gleam/order
 import gleam/otp/actor.{type StartError}
 import gleam/result
+import gleam/time/duration
+import gleam/time/timestamp
 import resp
 
 pub opaque type Database {
@@ -17,8 +22,17 @@ pub fn get(db: Database, key: String) -> resp.Resp {
   process.call_forever(db.inner, message(Get(key)))
 }
 
-pub fn set(db: Database, key: String, value: resp.Resp) -> resp.Resp {
-  process.call_forever(db.inner, message(Set(key, value)))
+pub fn set(
+  db: Database,
+  key: String,
+  value: resp.Resp,
+  duration: option.Option(Int),
+) -> resp.Resp {
+  let duration =
+    duration
+    |> option.map(fn(x) { int.max(x, 0) })
+    |> option.map(duration.milliseconds)
+  process.call_forever(db.inner, message(Set(key, value, duration)))
 }
 
 type Message {
@@ -34,21 +48,51 @@ fn message(command: Command) {
 
 type Command {
   Get(key: String)
-  Set(key: String, value: resp.Resp)
+  Set(key: String, value: resp.Resp, duration: option.Option(duration.Duration))
 }
 
-fn message_handler(message: Message, state: dict.Dict(String, resp.Resp)) {
+type Item {
+  Item(value: resp.Resp, expires_at: option.Option(timestamp.Timestamp))
+}
+
+fn message_handler(message: Message, state: dict.Dict(String, Item)) {
   let #(response, state) = case message.command {
-    Get(key) -> {
-      let response = state |> dict.get(key) |> result.unwrap(or: resp.Null)
-      #(response, state)
-    }
-    Set(key, value) -> {
-      let state = state |> dict.insert(key, value)
+    Get(key) -> handle_get(key, state)
+    Set(key, value, duration) -> {
+      let expires_at =
+        duration
+        |> option.map(fn(d) { timestamp.add(timestamp.system_time(), d) })
+      let item = Item(value, expires_at)
+      let state = state |> dict.insert(key, item)
       let response = resp.SimpleString("OK")
       #(response, state)
     }
   }
   process.send(message.sender, response)
   actor.continue(state)
+}
+
+fn handle_get(
+  key: String,
+  state: dict.Dict(String, Item),
+) -> #(resp.Resp, dict.Dict(String, Item)) {
+  let #(response, state) =
+    state
+    |> dict.get(key)
+    |> result.map(fn(item) {
+      case item.expires_at {
+        option.None -> #(item.value, state)
+        option.Some(expires_at) -> {
+          case timestamp.compare(timestamp.system_time(), expires_at) {
+            order.Gt -> {
+              let state = dict.delete(state, key)
+              #(resp.Null, state)
+            }
+            _ -> #(item.value, state)
+          }
+        }
+      }
+    })
+    |> result.unwrap(or: #(resp.Null, state))
+  #(response, state)
 }

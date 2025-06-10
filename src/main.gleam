@@ -1,5 +1,6 @@
 import database
 import gleam/bytes_tree
+import gleam/int
 import gleam/io
 import gleam/result
 import gleam/string
@@ -39,7 +40,7 @@ type Command {
   Ping
   Echo(resp.Resp)
   Get(key: String)
-  Set(key: String, value: resp.Resp)
+  Set(key: String, value: resp.Resp, duration: option.Option(Int))
 }
 
 fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
@@ -52,7 +53,15 @@ fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
     "ping", [] -> Ok(Ping)
     "echo", [value] -> Ok(Echo(value))
     "get", [resp.BulkString(key)] -> Ok(Get(key))
-    "set", [resp.BulkString(key), value] -> Ok(Set(key, value))
+    "set", [resp.BulkString(key), value] -> Ok(Set(key, value, None))
+    "set",
+      [
+        resp.BulkString(key),
+        value,
+        resp.BulkString("px"),
+        resp.BulkString(duration),
+      ]
+    -> Ok(Set(key, value, int.parse(duration) |> option.from_result))
     _, _ -> Error(resp.SimpleError("Unknown error"))
   }
 }
@@ -62,6 +71,6 @@ fn handle_command(db: database.Database, command: Command) -> resp.Resp {
     Ping -> resp.SimpleString("PONG")
     Echo(value) -> value
     Get(key) -> database.get(db, key)
-    Set(key, value) -> database.set(db, key, value)
+    Set(key, value, duration) -> database.set(db, key, value, duration)
   }
 }
