@@ -1,4 +1,5 @@
 import database
+import gleam/bit_array
 import gleam/bytes_tree
 import gleam/int
 import gleam/io
@@ -39,16 +40,22 @@ pub fn main() {
 type Command {
   Ping
   Echo(resp.Resp)
-  Get(key: String)
-  Set(key: String, value: resp.Resp, duration: option.Option(Int))
+  Get(key: BitArray)
+  Set(key: BitArray, value: resp.Resp, duration: option.Option(Int))
 }
 
 fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
   use #(command_name, args) <- result.try(case input {
     resp.Array([resp.BulkString(command_name), ..args]) ->
       Ok(#(command_name, args))
-    _ -> resp.SimpleError("Expected a non empty array") |> Error
+    _ -> resp.SimpleError(<<"Expected a non empty array">>) |> Error
   })
+  use command_name <- result.try(
+    bit_array.to_string(command_name)
+    |> result.map_error(fn(_) {
+      resp.SimpleError(<<"Expected a valid string as command name">>)
+    }),
+  )
   case command_name |> string.lowercase(), args {
     "ping", [] -> Ok(Ping)
     "echo", [value] -> Ok(Echo(value))
@@ -58,17 +65,24 @@ fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
       [
         resp.BulkString(key),
         value,
-        resp.BulkString("px"),
+        resp.BulkString(<<"px">>),
         resp.BulkString(duration),
       ]
-    -> Ok(Set(key, value, int.parse(duration) |> option.from_result))
-    _, _ -> Error(resp.SimpleError("Unknown error"))
+    -> {
+      let duration =
+        duration
+        |> bit_array.to_string
+        |> result.try(int.parse)
+        |> option.from_result
+      Ok(Set(key, value, duration))
+    }
+    _, _ -> Error(resp.SimpleError(<<"Unknown error">>))
   }
 }
 
 fn handle_command(db: database.Database, command: Command) -> resp.Resp {
   case command {
-    Ping -> resp.SimpleString("PONG")
+    Ping -> resp.SimpleString(<<"PONG">>)
     Echo(value) -> value
     Get(key) -> database.get(db, key)
     Set(key, value, duration) -> database.set(db, key, value, duration)

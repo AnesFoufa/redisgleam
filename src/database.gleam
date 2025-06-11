@@ -18,13 +18,13 @@ pub fn start() -> Result(Database, StartError) {
   Database(inner: subject)
 }
 
-pub fn get(db: Database, key: String) -> resp.Resp {
+pub fn get(db: Database, key: BitArray) -> resp.Resp {
   process.call_forever(db.inner, message(Get(key)))
 }
 
 pub fn set(
   db: Database,
-  key: String,
+  key: BitArray,
   value: resp.Resp,
   duration: option.Option(Int),
 ) -> resp.Resp {
@@ -47,15 +47,19 @@ fn message(command: Command) {
 }
 
 type Command {
-  Get(key: String)
-  Set(key: String, value: resp.Resp, duration: option.Option(duration.Duration))
+  Get(key: BitArray)
+  Set(
+    key: BitArray,
+    value: resp.Resp,
+    duration: option.Option(duration.Duration),
+  )
 }
 
 type Item {
   Item(value: resp.Resp, expires_at: option.Option(timestamp.Timestamp))
 }
 
-fn message_handler(message: Message, state: dict.Dict(String, Item)) {
+fn message_handler(message: Message, state: dict.Dict(BitArray, Item)) {
   let #(response, state) = case message.command {
     Get(key) -> handle_get(key, state)
     Set(key, value, duration) -> {
@@ -64,7 +68,7 @@ fn message_handler(message: Message, state: dict.Dict(String, Item)) {
         |> option.map(fn(d) { timestamp.add(timestamp.system_time(), d) })
       let item = Item(value, expires_at)
       let state = state |> dict.insert(key, item)
-      let response = resp.SimpleString("OK")
+      let response = resp.SimpleString(<<"OK">>)
       #(response, state)
     }
   }
@@ -73,9 +77,9 @@ fn message_handler(message: Message, state: dict.Dict(String, Item)) {
 }
 
 fn handle_get(
-  key: String,
-  state: dict.Dict(String, Item),
-) -> #(resp.Resp, dict.Dict(String, Item)) {
+  key: BitArray,
+  state: dict.Dict(BitArray, Item),
+) -> #(resp.Resp, dict.Dict(BitArray, Item)) {
   let #(response, state) =
     state
     |> dict.get(key)
