@@ -95,11 +95,37 @@ fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
         |> option.from_result
       Ok(Set(key, value, duration))
     }
-    "config", [resp.BulkString(<<"GET">>), resp.BulkString(<<"dir">>)] ->
-      Ok(GetConfigDir)
-    "config", [resp.BulkString(<<"GET">>), resp.BulkString(<<"db_filename">>)] ->
-      Ok(GetConfigDbFileName)
+    "config", [resp.BulkString(config_command), ..args] -> {
+      case bit_array.to_string(config_command) {
+        Ok(command_name) -> parse_config_command(command_name, args)
+        Error(_) ->
+          Error(resp.SimpleError(<<"Config command not a string!!!">>))
+      }
+    }
     _, _ -> Error(resp.SimpleError(<<"Unknown command">>))
+  }
+}
+
+fn parse_config_command(
+  command_name: String,
+  args: List(resp.Resp),
+) -> Result(Command, resp.Resp) {
+  case string.lowercase(command_name), args {
+    "get", [resp.BulkString(config_parameter)] -> {
+      use config_parameter_name <- result.try(
+        config_parameter
+        |> bit_array.to_string()
+        |> result.replace_error(
+          resp.SimpleError(<<"Config parameter not a string">>),
+        ),
+      )
+      case string.lowercase(config_parameter_name) {
+        "dir" -> Ok(GetConfigDir)
+        "db_filename" -> Ok(GetConfigDbFileName)
+        _ -> Error(resp.SimpleError(<<"Unexpected config parameter">>))
+      }
+    }
+    _, _ -> Error(resp.SimpleError(<<"Unknown config command">>))
   }
 }
 
