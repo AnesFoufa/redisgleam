@@ -1,3 +1,5 @@
+import argv
+import clad
 import database
 import gleam/bit_array
 import gleam/bytes_tree
@@ -6,6 +8,7 @@ import gleam/io
 import gleam/result
 import gleam/string
 
+import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/option.{None}
 import gleam/otp/actor
@@ -13,6 +16,16 @@ import glisten
 import resp.{from_bit_array}
 
 pub fn main() {
+  let config_decoder = {
+    use dir <- decode.optional_field("dir", "/var/lib/redis", decode.string)
+    use db_filename <- decode.optional_field(
+      "dbfilename",
+      "dump.rdb",
+      decode.string,
+    )
+    decode.success(Config(dir:, db_filename:))
+  }
+  let assert Ok(config) = clad.decode(argv.load().arguments, config_decoder)
   let assert Ok(db) = database.start()
   let assert Ok(_) =
     glisten.handler(fn(_conn) { #(Nil, None) }, fn(msg, state, conn) {
@@ -24,7 +37,7 @@ pub fn main() {
         |> result.map(parse_command)
         |> result.map_error(resp.SimpleError)
         |> result.flatten()
-        |> result.map(fn(command) { handle_command(db, command) })
+        |> result.map(fn(command) { handle_command(config, db, command) })
         |> result.unwrap_both()
         |> resp.to_bit_array()
         |> bytes_tree.from_bit_array()
@@ -42,6 +55,12 @@ type Command {
   Echo(resp.Resp)
   Get(key: BitArray)
   Set(key: BitArray, value: resp.Resp, duration: option.Option(Int))
+  GetConfigDir
+  GetConfigDbFileName
+}
+
+type Config {
+  Config(dir: String, db_filename: String)
 }
 
 fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
@@ -76,15 +95,33 @@ fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
         |> option.from_result
       Ok(Set(key, value, duration))
     }
-    _, _ -> Error(resp.SimpleError(<<"Unknown error">>))
+    "config", [resp.BulkString(<<"GET">>), resp.BulkString(<<"dir">>)] ->
+      Ok(GetConfigDir)
+    "config", [resp.BulkString(<<"GET">>), resp.BulkString(<<"db_filename">>)] ->
+      Ok(GetConfigDbFileName)
+    _, _ -> Error(resp.SimpleError(<<"Unknown command">>))
   }
 }
 
-fn handle_command(db: database.Database, command: Command) -> resp.Resp {
+fn handle_command(
+  config: Config,
+  db: database.Database,
+  command: Command,
+) -> resp.Resp {
   case command {
     Ping -> resp.SimpleString(<<"PONG">>)
     Echo(value) -> value
     Get(key) -> database.get(db, key)
     Set(key, value, duration) -> database.set(db, key, value, duration)
+    GetConfigDbFileName ->
+      resp.Array([
+        resp.BulkString(<<"db_filename">>),
+        resp.BulkString(bit_array.from_string(config.db_filename)),
+      ])
+    GetConfigDir ->
+      resp.Array([
+        resp.BulkString(<<"dir">>),
+        resp.BulkString(bit_array.from_string(config.dir)),
+      ])
   }
 }
