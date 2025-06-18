@@ -4,7 +4,7 @@ import gleam/int
 import gleam/list
 import gleam/option
 import gleam/order
-import gleam/otp/actor.{type StartError}
+import gleam/otp/actor
 import gleam/result
 import gleam/time/duration
 import gleam/time/timestamp
@@ -14,8 +14,8 @@ pub opaque type Database {
   Database(inner: Subject(Message))
 }
 
-pub fn start() -> Result(Database, StartError) {
-  use subject <- result.map(actor.start(dict.new(), message_handler))
+pub fn start() -> Database {
+  let assert Ok(subject) = actor.start(dict.new(), message_handler)
   Database(inner: subject)
 }
 

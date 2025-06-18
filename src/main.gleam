@@ -26,7 +26,7 @@ pub fn main() {
     decode.success(Config(dir:, db_filename:))
   }
   let assert Ok(config) = clad.decode(argv.load().arguments, config_decoder)
-  let assert Ok(db) = database.start()
+  let db = database.start()
   let assert Ok(_) =
     glisten.handler(fn(_conn) { #(Nil, None) }, fn(msg, state, conn) {
       io.println("Received message!")
