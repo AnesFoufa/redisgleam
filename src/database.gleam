@@ -1,6 +1,7 @@
 import gleam/dict
 import gleam/erlang/process.{type Subject}
 import gleam/int
+import gleam/list
 import gleam/option
 import gleam/order
 import gleam/otp/actor.{type StartError}
@@ -35,6 +36,10 @@ pub fn set(
   process.call_forever(db.inner, message(Set(key, value, duration)))
 }
 
+pub fn keys(db: Database) -> resp.Resp {
+  process.call_forever(db.inner, message(Keys))
+}
+
 type Message {
   Message(command: Command, sender: Subject(resp.Resp))
 }
@@ -53,6 +58,7 @@ type Command {
     value: resp.Resp,
     duration: option.Option(duration.Duration),
   )
+  Keys
 }
 
 type Item {
@@ -69,6 +75,13 @@ fn message_handler(message: Message, state: dict.Dict(BitArray, Item)) {
       let item = Item(value, expires_at)
       let state = state |> dict.insert(key, item)
       let response = resp.SimpleString(<<"OK">>)
+      #(response, state)
+    }
+    Keys -> {
+      let response =
+        dict.keys(state)
+        |> list.map(resp.BulkString)
+        |> resp.Array
       #(response, state)
     }
   }

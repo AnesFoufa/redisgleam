@@ -57,6 +57,7 @@ type Command {
   Set(key: BitArray, value: resp.Resp, duration: option.Option(Int))
   GetConfigDir
   GetConfigDbFileName
+  Keys
 }
 
 type Config {
@@ -102,6 +103,7 @@ fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
           Error(resp.SimpleError(<<"Config command not a string!!!">>))
       }
     }
+    "keys", _ -> Ok(Keys)
     _, _ -> Error(resp.SimpleError(<<"Unknown command">>))
   }
 }
@@ -149,5 +151,6 @@ fn handle_command(
         resp.BulkString(<<"dir">>),
         resp.BulkString(bit_array.from_string(config.dir)),
       ])
+    Keys -> database.keys(db)
   }
 }
