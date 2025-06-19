@@ -168,8 +168,11 @@ fn handle_command(
       ])
     InfoReplication -> {
       case config.replicaof {
-        option.None -> resp.BulkString(bit_array.from_string("role:master"))
         option.Some(_) -> resp.BulkString(bit_array.from_string("role:slave"))
+        option.None ->
+          resp.BulkString(bit_array.from_string(
+            "role:master\r\nmaster_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\nmaster_repl_offset:0",
+          ))
       }
     }
     Keys -> database.keys(db)
