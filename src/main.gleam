@@ -23,7 +23,8 @@ pub fn main() {
       "dump.rdb",
       decode.string,
     )
-    decode.success(database.Config(dir:, db_filename:))
+    use port <- decode.optional_field("port", 6379, decode.int)
+    decode.success(database.Config(dir:, db_filename:, port:))
   }
   let assert Ok(config) = clad.decode(argv.load().arguments, config_decoder)
   let db = database.start(config)
@@ -45,7 +46,7 @@ pub fn main() {
       let assert Ok(_) = glisten.send(conn, response)
       actor.continue(state)
     })
-    |> glisten.serve(6379)
+    |> glisten.serve(config.port)
 
   process.sleep_forever()
 }

@@ -18,7 +18,7 @@ pub opaque type Database {
 }
 
 pub type Config {
-  Config(dir: String, db_filename: String)
+  Config(dir: String, db_filename: String, port: Int)
 }
 
 pub fn start(config: Config) -> Database {
