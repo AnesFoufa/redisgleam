@@ -3,3 +3,4 @@
 /build
 erl_crash.dump
 .tool_versions
+commit.txt
