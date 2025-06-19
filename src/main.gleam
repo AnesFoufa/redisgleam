@@ -84,6 +84,17 @@ pub fn main() {
               let assert Ok(Nil) = mug.send(socket, capa_bs)
               let assert Ok(_repl_conf_capa_packet) =
                 mug.receive(socket, timeout_milliseconds: 100)
+              // Send PSYNC command
+              let psync_cmd =
+                resp.Array([
+                  resp.BulkString(bit_array.from_string("PSYNC")),
+                  resp.BulkString(bit_array.from_string("?")),
+                  resp.BulkString(bit_array.from_string("-1")),
+                ])
+              let psync_bs = resp.to_bit_array(psync_cmd)
+              let assert Ok(Nil) = mug.send(socket, psync_bs)
+              let assert Ok(_psync_packet) =
+                mug.receive(socket, timeout_milliseconds: 100)
               Nil
             }
             Error(_) -> io.println("Invalid master port")
