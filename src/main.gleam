@@ -137,6 +137,7 @@ type Command {
   Keys
   InfoReplication
   ReplConf(args: List(resp.Resp))
+  Psync
 }
 
 fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
@@ -192,6 +193,7 @@ fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
     }
     "keys", _ -> Ok(Keys)
     "replconf", args -> Ok(ReplConf(args))
+    "psync", _ -> Ok(Psync)
     _, _ -> Error(resp.SimpleError(<<"Unknown command">>))
   }
 }
@@ -224,6 +226,7 @@ fn handle_command(
   db: database.Database,
   command: Command,
 ) -> resp.Resp {
+  let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
   case command {
     Ping -> resp.SimpleString(<<"PONG">>)
     Echo(value) -> value
@@ -244,11 +247,15 @@ fn handle_command(
         option.Some(_) -> resp.BulkString(bit_array.from_string("role:slave"))
         option.None ->
           resp.BulkString(bit_array.from_string(
-            "role:master\r\nmaster_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\nmaster_repl_offset:0",
+            "role:master\r\nmaster_replid:"
+            <> repl_id
+            <> "\r\nmaster_repl_offset:0",
           ))
       }
     }
     ReplConf(_args) -> resp.SimpleString(<<"OK">>)
+    Psync ->
+      resp.SimpleString(bit_array.from_string("FULLRESYNC " <> repl_id <> " 0"))
     Keys -> database.keys(db)
   }
 }
