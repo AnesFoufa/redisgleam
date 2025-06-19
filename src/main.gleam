@@ -13,6 +13,7 @@ import gleam/erlang/process
 import gleam/option.{None}
 import gleam/otp/actor
 import glisten
+import mug
 import resp.{from_bit_array}
 
 pub fn main() {
@@ -33,6 +34,38 @@ pub fn main() {
   }
   let assert Ok(config) = clad.decode(argv.load().arguments, config_decoder)
   let db = database.start(config)
+
+  // Handshake: if replica configuration is provided, connect to master and send PING command.
+  case config.replicaof {
+    option.Some(replica_info) -> {
+      let parts = string.split(replica_info, " ")
+      case parts {
+        [master_host, master_port_str] ->
+          case int.parse(master_port_str) {
+            Ok(master_port) -> {
+              io.println(
+                "Connecting to master "
+                <> master_host
+                <> ":"
+                <> int.to_string(master_port),
+              )
+              let assert Ok(socket) =
+                mug.new(master_host, port: master_port)
+                |> mug.timeout(milliseconds: 500)
+                |> mug.connect()
+              let ping_cmd =
+                resp.Array([resp.BulkString(bit_array.from_string("PING"))])
+              let ping_bs = resp.to_bit_array(ping_cmd)
+              let assert Ok(Nil) = mug.send(socket, ping_bs)
+              Nil
+            }
+            Error(_) -> io.println("Invalid master port")
+          }
+        _ -> io.println("Invalid replicaof configuration format")
+      }
+    }
+    option.None -> io.println("No replica configuration provided")
+  }
   let assert Ok(_) =
     glisten.handler(fn(_conn) { #(Nil, None) }, fn(msg, state, conn) {
       io.println("Received message!")
