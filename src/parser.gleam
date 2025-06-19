@@ -1,4 +1,5 @@
 import gleam/bit_array
+import gleam/int
 import gleam/list
 import gleam/result
 
@@ -120,4 +121,17 @@ pub fn bytes(n: Int) -> Parser(BitArray) {
       _ -> Error(Unexpected(input))
     }
   })
+}
+
+pub fn at_most(n: Int, p: Parser(a)) -> Parser(List(a)) {
+  let n = int.max(n, 0)
+  Parser(do_at_most(n, [], p, _))
+}
+
+fn do_at_most(n, acc, p: Parser(a), input) {
+  case n, p.parse(input) {
+    0, _ -> Ok(#(list.reverse(acc), input))
+    _, Ok(#(x, rest)) -> do_at_most(n - 1, [x, ..acc], p, rest)
+    _, Error(_) -> Ok(#(list.reverse(acc), input))
+  }
 }

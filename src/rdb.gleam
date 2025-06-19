@@ -74,10 +74,7 @@ fn parse_string() -> Parser(BitArray) {
       let assert <<i:size(32)-little>> = bytes
       i |> int.to_string |> bit_array.from_string |> return
     }
-    StringEncoding(_x) -> {
-      echo size
-      panic
-    }
+    StringEncoding(_x) -> parser.fail()
   }
 }
 
@@ -116,9 +113,10 @@ fn parse_databases() -> Parser(List(Dict(BitArray, Item))) {
 fn parse_database() -> Parser(Dict(BitArray, Item)) {
   use _db_index <- bind(parse_size())
   use _size_section_indicator <- bind(parser.bits(<<0xFB:8>>))
-  use _hash_table_size <- bind(parse_size())
+  use hash_table_size <- bind(parse_size())
+  let assert Size(hash_table_size) = hash_table_size
   use _expires_size <- bind(parse_size())
-  use keys_items <- bind(parser.many(parse_key_item()))
+  use keys_items <- bind(parser.at_most(hash_table_size, parse_key_item()))
   return(dict.from_list(keys_items))
 }
 
@@ -132,5 +130,31 @@ fn parse_key_item() -> Parser(#(BitArray, Item)) {
 }
 
 fn parse_expires_at() -> Parser(Option(Timestamp)) {
-  parser.return(option.None)
+  parser.choice([
+    parse_expires_at_ms(),
+    parse_expires_at_s(),
+    return(option.None),
+  ])
+}
+
+fn parse_expires_at_ms() -> Parser(Option(Timestamp)) {
+  use _ <- bind(parser.bits(<<0xFC:8>>))
+  use timestamp_ms <- bind(parser.bytes(8))
+  let assert <<ts_milliseconds:size(8)-unit(8)-unsigned-little>> = timestamp_ms
+  let timestamp_seconds = ts_milliseconds / 1000
+  let timestamp_nanoseconds = { ts_milliseconds % 1000 } * 1000
+  let ts =
+    timestamp.from_unix_seconds_and_nanoseconds(
+      timestamp_seconds,
+      timestamp_nanoseconds,
+    )
+  return(option.Some(ts))
+}
+
+fn parse_expires_at_s() -> Parser(Option(Timestamp)) {
+  use _ <- bind(parser.bits(<<0xFD:8>>))
+  use timestamp_ms <- bind(parser.bytes(4))
+  let assert <<ts_seconds:size(4)-unit(8)-unsigned-little>> = timestamp_ms
+  let ts = timestamp.from_unix_seconds(ts_seconds)
+  return(option.Some(ts))
 }
