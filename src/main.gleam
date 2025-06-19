@@ -59,6 +59,7 @@ type Command {
   GetConfigDir
   GetConfigDbFileName
   Keys
+  InfoReplication
 }
 
 fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
@@ -98,6 +99,18 @@ fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
         Ok(command_name) -> parse_config_command(command_name, args)
         Error(_) ->
           Error(resp.SimpleError(<<"Config command not a string!!!">>))
+      }
+    }
+    "info", [resp.BulkString(section)] -> {
+      use section_str <- result.try(
+        bit_array.to_string(section)
+        |> result.map_error(fn(_) {
+          resp.SimpleError(<<"Expected a valid string as section name">>)
+        }),
+      )
+      case string.lowercase(section_str) {
+        "replication" -> Ok(InfoReplication)
+        _ -> Error(resp.SimpleError(<<"Unknown info section">>))
       }
     }
     "keys", _ -> Ok(Keys)
@@ -148,6 +161,7 @@ fn handle_command(
         resp.BulkString(<<"dir">>),
         resp.BulkString(bit_array.from_string(config.dir)),
       ])
+    InfoReplication -> resp.BulkString(bit_array.from_string("role:master"))
     Keys -> database.keys(db)
   }
 }
