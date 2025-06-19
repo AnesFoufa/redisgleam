@@ -129,9 +129,14 @@ pub fn at_most(n: Int, p: Parser(a)) -> Parser(List(a)) {
 }
 
 fn do_at_most(n, acc, p: Parser(a), input) {
-  case n, p.parse(input) {
-    0, _ -> Ok(#(list.reverse(acc), input))
-    _, Ok(#(x, rest)) -> do_at_most(n - 1, [x, ..acc], p, rest)
-    _, Error(_) -> Ok(#(list.reverse(acc), input))
+  case n {
+    0 -> Ok(#(list.reverse(acc), input))
+    _ if n > 0 -> {
+      case p.parse(input) {
+        Ok(#(x, rest)) -> do_at_most(n - 1, [x, ..acc], p, rest)
+        Error(_) -> Ok(#(list.reverse(acc), input))
+      }
+    }
+    _ -> panic
   }
 }
