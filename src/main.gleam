@@ -1,6 +1,6 @@
 import argv
 import clad
-import database
+import database.{type Config}
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/int
@@ -23,10 +23,10 @@ pub fn main() {
       "dump.rdb",
       decode.string,
     )
-    decode.success(Config(dir:, db_filename:))
+    decode.success(database.Config(dir:, db_filename:))
   }
   let assert Ok(config) = clad.decode(argv.load().arguments, config_decoder)
-  let db = database.start()
+  let db = database.start(config)
   let assert Ok(_) =
     glisten.handler(fn(_conn) { #(Nil, None) }, fn(msg, state, conn) {
       io.println("Received message!")
@@ -58,10 +58,6 @@ type Command {
   GetConfigDir
   GetConfigDbFileName
   Keys
-}
-
-type Config {
-  Config(dir: String, db_filename: String)
 }
 
 fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {

@@ -1,6 +1,9 @@
+import file_streams/file_stream
+import filepath
 import gleam/dict
 import gleam/erlang/process.{type Subject}
 import gleam/int
+import gleam/io
 import gleam/list
 import gleam/option
 import gleam/order
@@ -8,15 +11,35 @@ import gleam/otp/actor
 import gleam/result
 import gleam/time/duration
 import gleam/time/timestamp
+import rdb.{type Item}
 import resp
 
 pub opaque type Database {
   Database(inner: Subject(Message))
 }
 
-pub fn start() -> Database {
+pub type Config {
+  Config(dir: String, db_filename: String)
+}
+
+pub fn start(config: Config) -> Database {
   let assert Ok(subject) = actor.start(dict.new(), message_handler)
+  read_data_from_file(subject, config)
   Database(inner: subject)
+}
+
+fn read_data_from_file(subject: Subject(Message), config: Config) {
+  process.start(
+    fn() {
+      let path = filepath.join(config.dir, config.db_filename)
+      let assert Ok(stream) = file_stream.open_read(path)
+      let assert Ok(content) = file_stream.read_remaining_bytes(stream)
+      let assert Ok(rdb) = rdb.from_bit_array(content)
+      let assert Ok(data) = rdb.databases |> list.first
+      process.call_forever(subject, message(UpdataData(data)))
+    },
+    False,
+  )
 }
 
 pub fn get(db: Database, key: BitArray) -> resp.Resp {
@@ -40,6 +63,10 @@ pub fn keys(db: Database) -> resp.Resp {
   process.call_forever(db.inner, message(Keys))
 }
 
+pub fn update_data(db: Database, data: dict.Dict(BitArray, Item)) {
+  process.call_forever(db.inner, message(UpdataData(data)))
+}
+
 type Message {
   Message(command: Command, sender: Subject(resp.Resp))
 }
@@ -59,10 +86,7 @@ type Command {
     duration: option.Option(duration.Duration),
   )
   Keys
-}
-
-type Item {
-  Item(value: resp.Resp, expires_at: option.Option(timestamp.Timestamp))
+  UpdataData(data: dict.Dict(BitArray, Item))
 }
 
 fn message_handler(message: Message, state: dict.Dict(BitArray, Item)) {
@@ -72,7 +96,7 @@ fn message_handler(message: Message, state: dict.Dict(BitArray, Item)) {
       let expires_at =
         duration
         |> option.map(fn(d) { timestamp.add(timestamp.system_time(), d) })
-      let item = Item(value, expires_at)
+      let item = rdb.Item(value, expires_at)
       let state = state |> dict.insert(key, item)
       let response = resp.SimpleString(<<"OK">>)
       #(response, state)
@@ -82,6 +106,11 @@ fn message_handler(message: Message, state: dict.Dict(BitArray, Item)) {
         dict.keys(state)
         |> list.map(resp.BulkString)
         |> resp.Array
+      #(response, state)
+    }
+    UpdataData(data) -> {
+      let response = resp.SimpleString(<<"OK">>)
+      let state = dict.merge(data, state)
       #(response, state)
     }
   }
