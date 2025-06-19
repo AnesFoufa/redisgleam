@@ -57,6 +57,33 @@ pub fn main() {
                 resp.Array([resp.BulkString(bit_array.from_string("PING"))])
               let ping_bs = resp.to_bit_array(ping_cmd)
               let assert Ok(Nil) = mug.send(socket, ping_bs)
+              let assert Ok(_pong_packet) =
+                mug.receive(socket, timeout_milliseconds: 100)
+
+              // Send REPLCONF listening-port <PORT> command
+              let listening_port_cmd =
+                resp.Array([
+                  resp.BulkString(bit_array.from_string("REPLCONF")),
+                  resp.BulkString(bit_array.from_string("listening-port")),
+                  resp.BulkString(
+                    bit_array.from_string(int.to_string(config.port)),
+                  ),
+                ])
+              let listening_port_bs = resp.to_bit_array(listening_port_cmd)
+              let assert Ok(Nil) = mug.send(socket, listening_port_bs)
+              let assert Ok(_repl_conf_listening_port_packet) =
+                mug.receive(socket, timeout_milliseconds: 100)
+              // Send REPLCONF capa psync2 command
+              let capa_cmd =
+                resp.Array([
+                  resp.BulkString(bit_array.from_string("REPLCONF")),
+                  resp.BulkString(bit_array.from_string("capa")),
+                  resp.BulkString(bit_array.from_string("psync2")),
+                ])
+              let capa_bs = resp.to_bit_array(capa_cmd)
+              let assert Ok(Nil) = mug.send(socket, capa_bs)
+              let assert Ok(_repl_conf_capa_packet) =
+                mug.receive(socket, timeout_milliseconds: 100)
               Nil
             }
             Error(_) -> io.println("Invalid master port")
@@ -98,6 +125,7 @@ type Command {
   GetConfigDbFileName
   Keys
   InfoReplication
+  ReplConf(args: List(resp.Resp))
 }
 
 fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
@@ -152,6 +180,7 @@ fn parse_command(input: resp.Resp) -> Result(Command, resp.Resp) {
       }
     }
     "keys", _ -> Ok(Keys)
+    "replconf", args -> Ok(ReplConf(args))
     _, _ -> Error(resp.SimpleError(<<"Unknown command">>))
   }
 }
@@ -208,6 +237,7 @@ fn handle_command(
           ))
       }
     }
+    ReplConf(_args) -> resp.SimpleString(<<"OK">>)
     Keys -> database.keys(db)
   }
 }
