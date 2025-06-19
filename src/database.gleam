@@ -4,7 +4,7 @@ import gleam/dict
 import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/list
-import gleam/option
+import gleam/option.{type Option}
 import gleam/order
 import gleam/otp/actor
 import gleam/result
@@ -18,7 +18,7 @@ pub opaque type Database {
 }
 
 pub type Config {
-  Config(dir: String, db_filename: String, port: Int)
+  Config(dir: String, db_filename: String, port: Int, replicaof: Option(String))
 }
 
 pub fn start(config: Config) -> Database {

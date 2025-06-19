@@ -24,7 +24,12 @@ pub fn main() {
       decode.string,
     )
     use port <- decode.optional_field("port", 6379, decode.int)
-    decode.success(database.Config(dir:, db_filename:, port:))
+    use replicaof <- decode.optional_field(
+      "replicaof",
+      option.None,
+      decode.map(decode.string, option.Some),
+    )
+    decode.success(database.Config(dir:, db_filename:, port:, replicaof:))
   }
   let assert Ok(config) = clad.decode(argv.load().arguments, config_decoder)
   let db = database.start(config)
@@ -161,7 +166,12 @@ fn handle_command(
         resp.BulkString(<<"dir">>),
         resp.BulkString(bit_array.from_string(config.dir)),
       ])
-    InfoReplication -> resp.BulkString(bit_array.from_string("role:master"))
+    InfoReplication -> {
+      case config.replicaof {
+        option.None -> resp.BulkString(bit_array.from_string("role:master"))
+        option.Some(_) -> resp.BulkString(bit_array.from_string("role:slave"))
+      }
+    }
     Keys -> database.keys(db)
   }
 }
