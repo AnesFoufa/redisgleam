@@ -74,7 +74,7 @@ fn parse_string() -> Parser(BitArray) {
       let assert <<i:size(32)-little>> = bytes
       i |> int.to_string |> bit_array.from_string |> return
     }
-    StringEncoding(x) -> {
+    StringEncoding(_x) -> {
       echo size
       panic
     }

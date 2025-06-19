@@ -3,7 +3,6 @@ import filepath
 import gleam/dict
 import gleam/erlang/process.{type Subject}
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option
 import gleam/order
