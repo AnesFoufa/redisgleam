@@ -129,8 +129,7 @@ pub fn handle(config: Config, db: Database, command: Command) -> resp.Resp {
       }
     }
     ReplConf(_args) -> resp.SimpleString(<<"OK">>)
-    Psync ->
-      resp.SimpleString(bit_array.from_string("FULLRESYNC " <> repl_id <> " 0"))
+    Psync -> database.psync(db)
     Keys -> database.keys(db)
   }
 }
