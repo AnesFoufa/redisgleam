@@ -15,7 +15,7 @@ import rdb.{type Item}
 import resp
 
 pub opaque type Database {
-  Database(inner: Subject(Message))
+  Database(inner: Subject(Message), config: Config)
 }
 
 pub type Config {
@@ -35,7 +35,7 @@ pub fn start(config: Config) -> Database {
   let state = DatabaseState(dict.new(), replication_state)
   let assert Ok(subject) = actor.start(state, message_handler)
   read_data_from_file(subject, config)
-  Database(inner: subject)
+  Database(inner: subject, config:)
 }
 
 pub fn get(db: Database, key: BitArray) -> resp.Resp {
