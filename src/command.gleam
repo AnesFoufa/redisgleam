@@ -1,4 +1,3 @@
-import database.{type Config, type Database}
 import gleam/bit_array
 import gleam/int
 import gleam/option.{type Option}
@@ -97,39 +96,5 @@ fn parse_config_command(
       }
     }
     _, _ -> Error(resp.SimpleError(<<"Unknown config command">>))
-  }
-}
-
-pub fn handle(config: Config, db: Database, command: Command) -> resp.Resp {
-  let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
-  case command {
-    Ping -> resp.SimpleString(<<"PONG">>)
-    Echo(value) -> value
-    Get(key) -> database.get(db, key)
-    Set(key, value, duration) -> database.set(db, key, value, duration)
-    GetConfigDbFileName ->
-      resp.Array([
-        resp.BulkString(<<"db_filename">>),
-        resp.BulkString(bit_array.from_string(config.db_filename)),
-      ])
-    GetConfigDir ->
-      resp.Array([
-        resp.BulkString(<<"dir">>),
-        resp.BulkString(bit_array.from_string(config.dir)),
-      ])
-    InfoReplication -> {
-      case config.replicaof {
-        option.Some(_) -> resp.BulkString(bit_array.from_string("role:slave"))
-        option.None ->
-          resp.BulkString(bit_array.from_string(
-            "role:master\r\nmaster_replid:"
-            <> repl_id
-            <> "\r\nmaster_repl_offset:0",
-          ))
-      }
-    }
-    ReplConf(_args) -> resp.SimpleString(<<"OK">>)
-    Psync -> database.psync(db)
-    Keys -> database.keys(db)
   }
 }

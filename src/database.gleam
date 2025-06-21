@@ -1,3 +1,4 @@
+import command
 import file_streams/file_stream
 import filepath
 import gleam/bit_array
@@ -12,7 +13,7 @@ import gleam/result
 import gleam/time/duration
 import gleam/time/timestamp
 import rdb.{type Item}
-import resp
+import resp.{type Resp}
 
 pub opaque type Database {
   Database(inner: Subject(Message), config: Config)
@@ -38,11 +39,53 @@ pub fn start(config: Config) -> Database {
   Database(inner: subject, config:)
 }
 
-pub fn get(db: Database, key: BitArray) -> resp.Resp {
+pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
+  let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+  case cmd {
+    command.Ping -> resp.SimpleString(<<"PONG">>)
+    command.Echo(value) -> value
+    command.Get(key) -> get(db, key)
+    command.Set(key, value, duration) -> set(db, key, value, duration)
+    command.GetConfigDbFileName ->
+      resp.Array([
+        resp.BulkString(<<"db_filename">>),
+        resp.BulkString(bit_array.from_string(db.config.db_filename)),
+      ])
+    command.GetConfigDir ->
+      resp.Array([
+        resp.BulkString(<<"dir">>),
+        resp.BulkString(bit_array.from_string(db.config.dir)),
+      ])
+    command.InfoReplication -> {
+      case db.config.replicaof {
+        option.Some(_) -> resp.BulkString(bit_array.from_string("role:slave"))
+        option.None ->
+          resp.BulkString(bit_array.from_string(
+            "role:master\r\nmaster_replid:"
+            <> repl_id
+            <> "\r\nmaster_repl_offset:0",
+          ))
+      }
+    }
+    command.ReplConf(_args) -> resp.SimpleString(<<"OK">>)
+    command.Psync -> psync(db)
+    command.Keys -> keys(db)
+  }
+}
+
+pub fn update_data(db: Database, data: dict.Dict(BitArray, Item)) {
+  process.call_forever(db.inner, message(UpdataData(data)))
+}
+
+pub fn register(db: Database, subject) {
+  process.call_forever(db.inner, message(Register(subject)))
+}
+
+fn get(db: Database, key: BitArray) -> resp.Resp {
   process.call_forever(db.inner, message(Get(key)))
 }
 
-pub fn set(
+fn set(
   db: Database,
   key: BitArray,
   value: resp.Resp,
@@ -55,19 +98,11 @@ pub fn set(
   process.call_forever(db.inner, message(Set(key, value, duration)))
 }
 
-pub fn keys(db: Database) -> resp.Resp {
+fn keys(db: Database) -> resp.Resp {
   process.call_forever(db.inner, message(Keys))
 }
 
-pub fn update_data(db: Database, data: dict.Dict(BitArray, Item)) {
-  process.call_forever(db.inner, message(UpdataData(data)))
-}
-
-pub fn register(db: Database, subject) {
-  process.call_forever(db.inner, message(Register(subject)))
-}
-
-pub fn psync(db: Database) {
+fn psync(db: Database) {
   process.call_forever(db.inner, message(Psync))
 }
 

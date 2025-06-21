@@ -30,7 +30,7 @@ pub fn main() {
         database.register(db, subject)
         let selector =
           process.new_selector() |> process.selecting(subject, fn(x) { x })
-        #(#(config, db), option.Some(selector))
+        #(db, option.Some(selector))
       },
       handle_message,
     )
@@ -79,12 +79,12 @@ fn handle_message(msg, state, conn) {
       io.println("Received packet")
       echo msg
       let input = from_bit_array(msg)
-      let #(config, db) = state
+      let db = state
       input
       |> result.map(command.parse)
       |> result.map_error(resp.SimpleError)
       |> result.flatten()
-      |> result.map(command.handle(config, db, _))
+      |> result.map(database.handle_command(db, _))
       |> result.unwrap_both()
       |> resp.to_bit_array()
     }
