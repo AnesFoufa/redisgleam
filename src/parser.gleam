@@ -20,6 +20,13 @@ pub fn run(parser: Parser(a), input: BitArray) -> Result(a, ParseError) {
   })
 }
 
+pub fn run_with_rest(
+  parser: Parser(a),
+  input: BitArray,
+) -> Result(#(a, BitArray), ParseError) {
+  parser.parse(input)
+}
+
 pub fn return(val: a) -> Parser(a) {
   Parser(fn(input) { Ok(#(val, input)) })
 }

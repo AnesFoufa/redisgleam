@@ -20,6 +20,24 @@ pub fn from_bit_array(msg: BitArray) -> Result(Resp, BitArray) {
   }
 }
 
+/// Parse all RESP messages from a buffer, returning the list of parsed messages
+/// and any remaining bytes that couldn't be parsed (incomplete message)
+pub fn parse_all(msg: BitArray) -> #(List(Resp), BitArray) {
+  do_parse_all(msg, [])
+}
+
+fn do_parse_all(msg: BitArray, acc: List(Resp)) -> #(List(Resp), BitArray) {
+  case msg {
+    <<>> -> #(list.reverse(acc), <<>>)
+    _ -> {
+      case parser.run_with_rest(parse_resp(), msg) {
+        Ok(#(resp, rest)) -> do_parse_all(rest, [resp, ..acc])
+        Error(_) -> #(list.reverse(acc), msg)
+      }
+    }
+  }
+}
+
 pub fn to_bit_array(resp: Resp) -> BitArray {
   case resp {
     SimpleString(ba) -> <<"+", ba:bits, "\r\n">>
@@ -101,7 +119,7 @@ fn parse_array() -> Parser(Resp) {
   use _ <- bind(parser.bits(<<"*">>))
   use length <- bind(digits())
   use _ <- bind(parser.bits(<<"\r\n">>))
-  use elems <- bind(parser.many(parse_resp()))
+  use elems <- bind(parser.at_most(length, parse_resp()))
   case length == list.length(elems) {
     True -> return(Array(elems))
     False -> fail()

@@ -6,6 +6,7 @@ import gleam/bit_array
 import gleam/bytes_tree
 import gleam/int
 import gleam/io
+import gleam/list
 import gleam/result
 import gleam/string
 
@@ -15,14 +16,14 @@ import gleam/option
 import gleam/otp/actor
 import glisten
 import mug
-import resp.{from_bit_array}
+import resp
 
 pub fn main() {
   let cli_args = argv.load().arguments
   let assert Ok(config) = clad.decode(cli_args, config_decoder())
   let db = database.start(config)
 
-  replica_handshake(config)
+  replica_handshake(config, db)
   let assert Ok(_) =
     glisten.handler(
       fn(_conn) {
@@ -78,7 +79,7 @@ fn handle_message(msg, state, conn) {
     glisten.Packet(msg) -> {
       io.println("Received packet")
       echo msg
-      let input = from_bit_array(msg)
+      let input = resp.from_bit_array(msg)
       let db = state
       input
       |> result.map(command.parse)
@@ -98,7 +99,7 @@ fn handle_message(msg, state, conn) {
   actor.continue(state)
 }
 
-fn replica_handshake(config: database.Config) -> Nil {
+fn replica_handshake(config: database.Config, db: database.Database) -> Nil {
   case config.replicaof {
     option.Some(#(master_host, master_port)) -> {
       io.println(
@@ -149,10 +150,118 @@ fn replica_handshake(config: database.Config) -> Nil {
         ])
       let psync_bs = resp.to_bit_array(psync_cmd)
       let assert Ok(Nil) = mug.send(socket, psync_bs)
-      let assert Ok(_psync_packet) =
-        mug.receive(socket, timeout_milliseconds: 100)
+
+      // Receive FULLRESYNC response and RDB file
+      let assert Ok(psync_and_rdb) =
+        mug.receive(socket, timeout_milliseconds: 1000)
+      // Skip the FULLRESYNC response and RDB file
+      // Format: +FULLRESYNC <replid> <offset>\r\n$<length>\r\n<rdb_bytes>
+      let leftover = skip_fullresync_and_rdb(psync_and_rdb)
+
+      // Start background process to receive propagated commands
+      process.start(
+        fn() { receive_propagated_commands(socket, db, leftover) },
+        True,
+      )
       Nil
     }
     option.None -> Nil
   }
+}
+
+/// Skip the FULLRESYNC response and RDB file, return any leftover bytes
+fn skip_fullresync_and_rdb(data: BitArray) -> BitArray {
+  // Find the end of the FULLRESYNC line
+  let data = skip_until_crlf(data)
+  // Now we should have $<length>\r\n<rdb_bytes>...
+  skip_rdb_file(data)
+}
+
+fn skip_until_crlf(data: BitArray) -> BitArray {
+  case data {
+    <<"\r\n":utf8, rest:bits>> -> rest
+    <<_:8, rest:bits>> -> skip_until_crlf(rest)
+    _ -> <<>>
+  }
+}
+
+fn skip_rdb_file(data: BitArray) -> BitArray {
+  case data {
+    <<"$":utf8, rest:bits>> -> {
+      // Parse the length
+      let #(length, rest) = parse_rdb_length(rest, 0)
+      // Skip past \r\n and the RDB bytes
+      case rest {
+        <<"\r\n":utf8, rest:bits>> -> {
+          case bit_array.byte_size(rest) >= length {
+            True -> {
+              let assert <<_rdb:bytes-size(length), leftover:bits>> = rest
+              leftover
+            }
+            False -> <<>>
+          }
+        }
+        _ -> <<>>
+      }
+    }
+    _ -> <<>>
+  }
+}
+
+fn parse_rdb_length(data: BitArray, acc: Int) -> #(Int, BitArray) {
+  case data {
+    <<c:8, rest:bits>> if c >= 0x30 && c <= 0x39 -> {
+      let digit = c - 0x30
+      parse_rdb_length(rest, acc * 10 + digit)
+    }
+    _ -> #(acc, data)
+  }
+}
+
+/// Receive and process propagated commands from master
+fn receive_propagated_commands(
+  socket: mug.Socket,
+  db: database.Database,
+  initial_buffer: BitArray,
+) -> Nil {
+  // Process any commands in the initial buffer first
+  let buffer = process_buffer(initial_buffer, db)
+
+  // Loop to receive more commands
+  receive_loop(socket, db, buffer)
+}
+
+fn receive_loop(
+  socket: mug.Socket,
+  db: database.Database,
+  buffer: BitArray,
+) -> Nil {
+  case mug.receive(socket, timeout_milliseconds: 60_000) {
+    Ok(data) -> {
+      let combined = bit_array.append(buffer, data)
+      let new_buffer = process_buffer(combined, db)
+      receive_loop(socket, db, new_buffer)
+    }
+    Error(_) -> {
+      // Timeout or error, just continue waiting
+      receive_loop(socket, db, buffer)
+    }
+  }
+}
+
+fn process_buffer(buffer: BitArray, db: database.Database) -> BitArray {
+  let #(commands, leftover) = resp.parse_all(buffer)
+  list.each(commands, fn(resp_cmd) {
+    case command.parse(resp_cmd) {
+      Ok(cmd) -> {
+        io.println("Processing propagated command")
+        database.apply_command_silent(db, cmd)
+      }
+      Error(_) -> {
+        io.println("Failed to parse propagated command")
+        Nil
+      }
+    }
+  })
+  leftover
 }

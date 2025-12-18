@@ -73,6 +73,18 @@ pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
   }
 }
 
+/// Apply a command silently (no response). Used for processing propagated commands from master.
+pub fn apply_command_silent(db: Database, cmd: command.Command) -> Nil {
+  case cmd {
+    command.Set(key, value, duration) -> {
+      set(db, key, value, duration)
+      Nil
+    }
+    // Other write commands can be added here as needed
+    _ -> Nil
+  }
+}
+
 pub fn update_data(db: Database, data: dict.Dict(BitArray, Item)) {
   process.call_forever(db.inner, message(UpdataData(data)))
 }
