@@ -22,12 +22,12 @@ pub fn parse(input: Resp) -> Result(Command, resp.Resp) {
   use #(command_name, args) <- result.try(case input {
     resp.Array([resp.BulkString(command_name), ..args]) ->
       Ok(#(command_name, args))
-    _ -> resp.SimpleError(<<"Expected a non empty array">>) |> Error
+    _ -> resp.SimpleError(<<"Expected non-empty array">>) |> Error
   })
   use command_name <- result.try(
     bit_array.to_string(command_name)
     |> result.map_error(fn(_) {
-      resp.SimpleError(<<"Expected a valid string as command name">>)
+      resp.SimpleError(<<"Expected valid string as command name">>)
     }),
   )
   case command_name |> string.lowercase(), args {
@@ -47,7 +47,7 @@ pub fn parse(input: Resp) -> Result(Command, resp.Resp) {
         option_name
         |> bit_array.to_string()
         |> result.replace_error(
-          resp.SimpleError(<<"Expected a valid string as option name">>),
+          resp.SimpleError(<<"Expected valid string as option name">>),
         ),
       )
       case string.lowercase(option_name) {
@@ -66,14 +66,14 @@ pub fn parse(input: Resp) -> Result(Command, resp.Resp) {
       case bit_array.to_string(config_command) {
         Ok(command_name) -> parse_config_command(command_name, args)
         Error(_) ->
-          Error(resp.SimpleError(<<"Config command not a string!!!">>))
+          Error(resp.SimpleError(<<"Expected valid string as config command">>))
       }
     }
     "info", [resp.BulkString(section)] -> {
       use section_str <- result.try(
         bit_array.to_string(section)
         |> result.map_error(fn(_) {
-          resp.SimpleError(<<"Expected a valid string as section name">>)
+          resp.SimpleError(<<"Expected valid string as section name">>)
         }),
       )
       case string.lowercase(section_str) {
@@ -98,13 +98,13 @@ fn parse_config_command(
         config_parameter
         |> bit_array.to_string()
         |> result.replace_error(
-          resp.SimpleError(<<"Config parameter not a string">>),
+          resp.SimpleError(<<"Expected valid string as config parameter">>),
         ),
       )
       case string.lowercase(config_parameter_name) {
         "dir" -> Ok(GetConfigDir)
         "db_filename" -> Ok(GetConfigDbFileName)
-        _ -> Error(resp.SimpleError(<<"Unexpected config parameter">>))
+        _ -> Error(resp.SimpleError(<<"Unknown config parameter">>))
       }
     }
     _, _ -> Error(resp.SimpleError(<<"Unknown config command">>))
