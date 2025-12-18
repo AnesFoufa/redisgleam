@@ -98,71 +98,84 @@ fn handle_message(msg, db, conn) {
 fn replica_handshake(config: database.Config, db: database.Database) -> Nil {
   case config.replicaof {
     option.Some(#(master_host, master_port)) -> {
-      io.println(
-        "Connecting to master "
-        <> master_host
-        <> ":"
-        <> int.to_string(master_port),
-      )
-      let assert Ok(socket) =
-        mug.new(master_host, port: master_port)
-        |> mug.timeout(milliseconds: 500)
-        |> mug.connect()
-      let ping_cmd =
-        resp.Array([resp.BulkString(bit_array.from_string("PING"))])
-      let ping_bs = resp.to_bit_array(ping_cmd)
-      let assert Ok(Nil) = mug.send(socket, ping_bs)
-      let assert Ok(_pong_packet) =
-        mug.receive(socket, timeout_milliseconds: 100)
-
-      // Send REPLCONF listening-port <PORT> command
-      let listening_port_cmd =
-        resp.Array([
-          resp.BulkString(bit_array.from_string("REPLCONF")),
-          resp.BulkString(bit_array.from_string("listening-port")),
-          resp.BulkString(bit_array.from_string(int.to_string(config.port))),
-        ])
-      let listening_port_bs = resp.to_bit_array(listening_port_cmd)
-      let assert Ok(Nil) = mug.send(socket, listening_port_bs)
-      let assert Ok(_repl_conf_listening_port_packet) =
-        mug.receive(socket, timeout_milliseconds: 100)
-      // Send REPLCONF capa psync2 command
-      let capa_cmd =
-        resp.Array([
-          resp.BulkString(bit_array.from_string("REPLCONF")),
-          resp.BulkString(bit_array.from_string("capa")),
-          resp.BulkString(bit_array.from_string("psync2")),
-        ])
-      let capa_bs = resp.to_bit_array(capa_cmd)
-      let assert Ok(Nil) = mug.send(socket, capa_bs)
-      let assert Ok(_repl_conf_capa_packet) =
-        mug.receive(socket, timeout_milliseconds: 100)
-      // Send PSYNC command
-      let psync_cmd =
-        resp.Array([
-          resp.BulkString(bit_array.from_string("PSYNC")),
-          resp.BulkString(bit_array.from_string("?")),
-          resp.BulkString(bit_array.from_string("-1")),
-        ])
-      let psync_bs = resp.to_bit_array(psync_cmd)
-      let assert Ok(Nil) = mug.send(socket, psync_bs)
-
-      // Receive FULLRESYNC response and RDB file
-      let assert Ok(psync_and_rdb) =
-        mug.receive(socket, timeout_milliseconds: 1000)
-      // Skip the FULLRESYNC response and RDB file
-      // Format: +FULLRESYNC <replid> <offset>\r\n$<length>\r\n<rdb_bytes>
-      let leftover = skip_fullresync_and_rdb(psync_and_rdb)
-
-      // Start background process to receive propagated commands
-      process.start(
-        fn() { receive_propagated_commands(socket, db, leftover) },
-        True,
-      )
+      let socket = connect_to_master(master_host, master_port)
+      send_ping(socket)
+      send_replconf_commands(socket, config.port)
+      send_psync(socket)
+      let leftover = receive_fullresync(socket)
+      start_replication_listener(socket, db, leftover)
       Nil
     }
     option.None -> Nil
   }
+}
+
+fn connect_to_master(host: String, port: Int) -> mug.Socket {
+  io.println("Connecting to master " <> host <> ":" <> int.to_string(port))
+  let assert Ok(socket) =
+    mug.new(host, port: port)
+    |> mug.timeout(milliseconds: 500)
+    |> mug.connect()
+  socket
+}
+
+fn send_ping(socket: mug.Socket) -> Nil {
+  let ping_cmd = resp.Array([resp.BulkString(bit_array.from_string("PING"))])
+  let assert Ok(Nil) = mug.send(socket, resp.to_bit_array(ping_cmd))
+  let assert Ok(_pong_packet) = mug.receive(socket, timeout_milliseconds: 100)
+  Nil
+}
+
+fn send_replconf_commands(socket: mug.Socket, port: Int) -> Nil {
+  // Send REPLCONF listening-port <PORT> command
+  let listening_port_cmd =
+    resp.Array([
+      resp.BulkString(bit_array.from_string("REPLCONF")),
+      resp.BulkString(bit_array.from_string("listening-port")),
+      resp.BulkString(bit_array.from_string(int.to_string(port))),
+    ])
+  let assert Ok(Nil) = mug.send(socket, resp.to_bit_array(listening_port_cmd))
+  let assert Ok(_) = mug.receive(socket, timeout_milliseconds: 100)
+
+  // Send REPLCONF capa psync2 command
+  let capa_cmd =
+    resp.Array([
+      resp.BulkString(bit_array.from_string("REPLCONF")),
+      resp.BulkString(bit_array.from_string("capa")),
+      resp.BulkString(bit_array.from_string("psync2")),
+    ])
+  let assert Ok(Nil) = mug.send(socket, resp.to_bit_array(capa_cmd))
+  let assert Ok(_) = mug.receive(socket, timeout_milliseconds: 100)
+  Nil
+}
+
+fn send_psync(socket: mug.Socket) -> Nil {
+  let psync_cmd =
+    resp.Array([
+      resp.BulkString(bit_array.from_string("PSYNC")),
+      resp.BulkString(bit_array.from_string("?")),
+      resp.BulkString(bit_array.from_string("-1")),
+    ])
+  let assert Ok(Nil) = mug.send(socket, resp.to_bit_array(psync_cmd))
+  Nil
+}
+
+fn receive_fullresync(socket: mug.Socket) -> BitArray {
+  let assert Ok(psync_and_rdb) =
+    mug.receive(socket, timeout_milliseconds: 1000)
+  skip_fullresync_and_rdb(psync_and_rdb)
+}
+
+fn start_replication_listener(
+  socket: mug.Socket,
+  db: database.Database,
+  initial_buffer: BitArray,
+) -> Nil {
+  process.start(
+    fn() { receive_propagated_commands(socket, db, initial_buffer) },
+    True,
+  )
+  Nil
 }
 
 /// Skip the FULLRESYNC response and RDB file, return any leftover bytes
