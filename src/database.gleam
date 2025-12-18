@@ -91,11 +91,14 @@ fn set(
   value: resp.Resp,
   duration: option.Option(Int),
 ) -> resp.Resp {
+  let duration_ms = duration |> option.map(fn(x) { int.max(x, 0) })
   let duration =
-    duration
-    |> option.map(fn(x) { int.max(x, 0) })
+    duration_ms
     |> option.map(duration.milliseconds)
-  process.call_forever(db.inner, message(Set(key, value, duration)))
+  process.call_forever(
+    db.inner,
+    message(Set(key, value, duration, duration_ms)),
+  )
 }
 
 fn keys(db: Database) -> resp.Resp {
@@ -156,6 +159,7 @@ type Command {
     key: BitArray,
     value: resp.Resp,
     duration: option.Option(duration.Duration),
+    duration_ms: option.Option(Int),
   )
   Keys
   UpdataData(data: dict.Dict(BitArray, Item))
@@ -166,7 +170,7 @@ type Command {
 fn message_handler(message: Message, state: DatabaseState) {
   let #(response, state) = case message.command {
     Get(key) -> handle_get(key, state)
-    Set(key, value, duration) -> {
+    Set(key, value, duration, _duration_ms) -> {
       let expires_at =
         duration
         |> option.map(fn(d) { timestamp.add(timestamp.system_time(), d) })
@@ -205,6 +209,20 @@ fn message_handler(message: Message, state: DatabaseState) {
     }
     Psync -> {
       let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+      let replication_state =
+        case state.replication_state {
+          Master(subjects_registry, slaves) -> {
+            let pid = process.subject_owner(message.sender)
+            let new_slaves =
+              case dict.get(subjects_registry, pid) {
+                Ok(subject) -> [subject, ..slaves]
+                Error(_) -> slaves
+              }
+            Master(subjects_registry:, slaves: new_slaves)
+          }
+          Slave(master_host, master_port) -> Slave(master_host, master_port)
+        }
+      let state = DatabaseState(..state, replication_state:)
       let response =
         resp.SimpleString(bit_array.from_string(
           "FULLRESYNC " <> repl_id <> " 0",
@@ -214,22 +232,8 @@ fn message_handler(message: Message, state: DatabaseState) {
   }
   process.send(message.sender, response)
   case message.command {
-    Psync -> {
-      case state.replication_state {
-        Master(_, _) as m -> {
-          let pid = process.subject_owner(message.sender)
-          let stream_subject = dict.get(m.subjects_registry, pid)
-          // Send empty RDB file
-          let rdb =
-            0x524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2
-          let playload = <<"$88\r\n":utf8, rdb:size({ 88 * 8 })>>
-          stream_subject
-          |> result.map(fn(sub) { process.send(sub, playload) })
-          |> result.unwrap_both
-        }
-        Slave(_, _) -> Nil
-      }
-    }
+    Psync -> send_rdb_to_slave(state, message.sender)
+    Set(_, _, _, _) -> propagate_write_command(message.command, state)
     _ -> Nil
   }
   actor.continue(state)
@@ -259,4 +263,69 @@ fn handle_get(
     })
     |> result.unwrap(or: #(resp.Null, state))
   #(response, state)
+}
+
+fn send_rdb_to_slave(state: DatabaseState, sender: Subject(resp.Resp)) {
+  case state.replication_state {
+    Master(subjects_registry, _) -> {
+      let pid = process.subject_owner(sender)
+      let stream_subject = dict.get(subjects_registry, pid)
+      let rdb =
+        0x524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2
+      let playload = <<"$88\r\n":utf8, rdb:size({ 88 * 8 })>>
+      stream_subject
+      |> result.map(fn(sub) { process.send(sub, playload) })
+      |> result.unwrap_both
+    }
+    Slave(_, _) -> Nil
+  }
+}
+
+fn propagate_write_command(command: Command, state: DatabaseState) {
+  case command_to_propagation_payload(command) {
+    option.Some(payload) -> {
+      case state.replication_state {
+        Master(_, slaves) -> send_payload_to_slaves(slaves, payload)
+        Slave(_, _) -> Nil
+      }
+    }
+    option.None -> Nil
+  }
+}
+
+fn send_payload_to_slaves(
+  slaves: List(process.Subject(BitArray)),
+  payload: BitArray,
+) {
+  list.each(slaves, fn(slave) { process.send(slave, payload) })
+}
+
+fn command_to_propagation_payload(
+  command: Command,
+) -> option.Option(BitArray) {
+  case command {
+    Set(key, resp.BulkString(value), _, duration_ms) -> {
+      let base_args = [
+        resp.BulkString(bit_array.from_string("SET")),
+        resp.BulkString(key),
+        resp.BulkString(value),
+      ]
+      let args =
+        case duration_ms {
+          option.Some(ms) -> {
+            let extras = [
+              resp.BulkString(bit_array.from_string("PX")),
+              resp.BulkString(bit_array.from_string(int.to_string(ms))),
+            ]
+            list.append(base_args, extras)
+          }
+          option.None -> base_args
+        }
+      resp.Array(args)
+      |> resp.to_bit_array
+      |> option.Some
+    }
+    Set(_, _, _, _) -> option.None
+    _ -> option.None
+  }
 }

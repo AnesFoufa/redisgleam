@@ -39,16 +39,28 @@ pub fn parse(input: Resp) -> Result(Command, resp.Resp) {
       [
         resp.BulkString(key),
         value,
-        resp.BulkString(<<"px">>),
+        resp.BulkString(option_name),
         resp.BulkString(duration),
       ]
     -> {
-      let duration =
-        duration
-        |> bit_array.to_string
-        |> result.try(int.parse)
-        |> option.from_result
-      Ok(Set(key, value, duration))
+      use option_name <- result.try(
+        option_name
+        |> bit_array.to_string()
+        |> result.replace_error(
+          resp.SimpleError(<<"Expected a valid string as option name">>),
+        ),
+      )
+      case string.lowercase(option_name) {
+        "px" -> {
+          let duration =
+            duration
+            |> bit_array.to_string
+            |> result.try(int.parse)
+            |> option.from_result
+          Ok(Set(key, value, duration))
+        }
+        _ -> Error(resp.SimpleError(<<"Unknown set option">>))
+      }
     }
     "config", [resp.BulkString(config_command), ..args] -> {
       case bit_array.to_string(config_command) {
