@@ -15,6 +15,10 @@ import gleam/time/timestamp
 import rdb.{type Item}
 import resp.{type Resp}
 
+const default_repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+
+const empty_rdb_hex = 0x524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2
+
 pub opaque type Database {
   Database(inner: Subject(Message), config: Config)
 }
@@ -40,7 +44,6 @@ pub fn start(config: Config) -> Database {
 }
 
 pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
-  let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
   case cmd {
     command.Ping -> resp.SimpleString(<<"PONG">>)
     command.Echo(value) -> value
@@ -62,7 +65,7 @@ pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
         option.None ->
           resp.BulkString(bit_array.from_string(
             "role:master\r\nmaster_replid:"
-            <> repl_id
+            <> default_repl_id
             <> "\r\nmaster_repl_offset:0",
           ))
       }
@@ -220,7 +223,6 @@ fn message_handler(message: Message, state: DatabaseState) {
       }
     }
     Psync -> {
-      let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
       let replication_state = case state.replication_state {
         Master(subjects_registry, slaves) -> {
           let pid = process.subject_owner(message.sender)
@@ -235,7 +237,7 @@ fn message_handler(message: Message, state: DatabaseState) {
       let state = DatabaseState(..state, replication_state:)
       let response =
         resp.SimpleString(bit_array.from_string(
-          "FULLRESYNC " <> repl_id <> " 0",
+          "FULLRESYNC " <> default_repl_id <> " 0",
         ))
       #(response, state)
     }
@@ -280,9 +282,7 @@ fn send_rdb_to_slave(state: DatabaseState, sender: Subject(resp.Resp)) {
     Master(subjects_registry, _) -> {
       let pid = process.subject_owner(sender)
       let stream_subject = dict.get(subjects_registry, pid)
-      let rdb =
-        0x524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2
-      let playload = <<"$88\r\n":utf8, rdb:size({ 88 * 8 })>>
+      let playload = <<"$88\r\n":utf8, empty_rdb_hex:size({ 88 * 8 })>>
       stream_subject
       |> result.map(fn(sub) { process.send(sub, playload) })
       |> result.unwrap_both
