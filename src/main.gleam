@@ -78,7 +78,6 @@ fn handle_message(msg, state, conn) {
   let response = case msg {
     glisten.Packet(msg) -> {
       io.println("Received packet")
-      echo msg
       let input = resp.from_bit_array(msg)
       let db = state
       input
@@ -94,7 +93,6 @@ fn handle_message(msg, state, conn) {
       stream
     }
   }
-  echo response
   let assert Ok(_) = glisten.send(conn, response |> bytes_tree.from_bit_array)
   actor.continue(state)
 }

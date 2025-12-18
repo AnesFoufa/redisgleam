@@ -31,9 +31,7 @@ pub fn from_bit_array(input: BitArray) -> Result(Rdb, BitArray) {
 
 fn parse_rdb() -> Parser(Rdb) {
   use version <- bind(parse_version())
-  echo version
   use metadata <- bind(parse_metadata())
-  echo metadata
   use databases <- bind(parse_databases())
   return(Rdb(version, metadata, databases))
 }
@@ -98,10 +96,7 @@ fn parse_size() -> Parser(Size) {
       return(Size(i))
     }
     <<0b11:2, rest:6>> -> return(StringEncoding(rest))
-    _ -> {
-      echo char
-      panic
-    }
+    _ -> parser.fail()
   }
 }
 
