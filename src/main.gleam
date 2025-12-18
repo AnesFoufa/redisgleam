@@ -73,14 +73,12 @@ fn config_decoder() {
   }
 }
 
-fn handle_message(msg, state, conn) {
+fn handle_message(msg, db, conn) {
   io.println("Received message!")
   let response = case msg {
     glisten.Packet(msg) -> {
       io.println("Received packet")
-      let input = resp.from_bit_array(msg)
-      let db = state
-      input
+      resp.from_bit_array(msg)
       |> result.map(command.parse)
       |> result.map_error(resp.SimpleError)
       |> result.flatten()
@@ -94,7 +92,7 @@ fn handle_message(msg, state, conn) {
     }
   }
   let assert Ok(_) = glisten.send(conn, response |> bytes_tree.from_bit_array)
-  actor.continue(state)
+  actor.continue(db)
 }
 
 fn replica_handshake(config: database.Config, db: database.Database) -> Nil {
