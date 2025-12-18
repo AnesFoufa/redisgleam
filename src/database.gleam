@@ -86,7 +86,7 @@ pub fn apply_command_silent(db: Database, cmd: command.Command) -> Nil {
 }
 
 pub fn update_data(db: Database, data: dict.Dict(BitArray, Item)) {
-  process.call_forever(db.inner, message(UpdataData(data)))
+  process.call_forever(db.inner, message(UpdateDate(data)))
 }
 
 pub fn register(db: Database, subject) {
@@ -148,7 +148,7 @@ fn read_data_from_file(subject: Subject(Message), config: Config) {
       let assert Ok(content) = file_stream.read_remaining_bytes(stream)
       let assert Ok(rdb) = rdb.from_bit_array(content)
       let assert Ok(data) = rdb.databases |> list.first
-      process.call_forever(subject, message(UpdataData(data)))
+      process.call_forever(subject, message(UpdateDate(data)))
     },
     False,
   )
@@ -174,7 +174,7 @@ type Command {
     duration_ms: option.Option(Int),
   )
   Keys
-  UpdataData(data: dict.Dict(BitArray, Item))
+  UpdateDate(data: dict.Dict(BitArray, Item))
   Register(subject: process.Subject(BitArray))
   Psync
 }
@@ -199,7 +199,7 @@ fn message_handler(message: Message, state: DatabaseState) {
         |> resp.Array
       #(response, state)
     }
-    UpdataData(incoming_data) -> {
+    UpdateDate(incoming_data) -> {
       let response = resp.SimpleString(<<"OK">>)
       let data = dict.merge(incoming_data, state.data)
       let state = DatabaseState(..state, data:)
@@ -221,19 +221,17 @@ fn message_handler(message: Message, state: DatabaseState) {
     }
     Psync -> {
       let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
-      let replication_state =
-        case state.replication_state {
-          Master(subjects_registry, slaves) -> {
-            let pid = process.subject_owner(message.sender)
-            let new_slaves =
-              case dict.get(subjects_registry, pid) {
-                Ok(subject) -> [subject, ..slaves]
-                Error(_) -> slaves
-              }
-            Master(subjects_registry:, slaves: new_slaves)
+      let replication_state = case state.replication_state {
+        Master(subjects_registry, slaves) -> {
+          let pid = process.subject_owner(message.sender)
+          let new_slaves = case dict.get(subjects_registry, pid) {
+            Ok(subject) -> [subject, ..slaves]
+            Error(_) -> slaves
           }
-          Slave(master_host, master_port) -> Slave(master_host, master_port)
+          Master(subjects_registry:, slaves: new_slaves)
         }
+        Slave(master_host, master_port) -> Slave(master_host, master_port)
+      }
       let state = DatabaseState(..state, replication_state:)
       let response =
         resp.SimpleString(bit_array.from_string(
@@ -312,9 +310,7 @@ fn send_payload_to_slaves(
   list.each(slaves, fn(slave) { process.send(slave, payload) })
 }
 
-fn command_to_propagation_payload(
-  command: Command,
-) -> option.Option(BitArray) {
+fn command_to_propagation_payload(command: Command) -> option.Option(BitArray) {
   case command {
     Set(key, resp.BulkString(value), _, duration_ms) -> {
       let base_args = [
@@ -322,17 +318,16 @@ fn command_to_propagation_payload(
         resp.BulkString(key),
         resp.BulkString(value),
       ]
-      let args =
-        case duration_ms {
-          option.Some(ms) -> {
-            let extras = [
-              resp.BulkString(bit_array.from_string("PX")),
-              resp.BulkString(bit_array.from_string(int.to_string(ms))),
-            ]
-            list.append(base_args, extras)
-          }
-          option.None -> base_args
+      let args = case duration_ms {
+        option.Some(ms) -> {
+          let extras = [
+            resp.BulkString(bit_array.from_string("PX")),
+            resp.BulkString(bit_array.from_string(int.to_string(ms))),
+          ]
+          list.append(base_args, extras)
         }
+        option.None -> base_args
+      }
       resp.Array(args)
       |> resp.to_bit_array
       |> option.Some
