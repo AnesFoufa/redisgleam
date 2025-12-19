@@ -146,27 +146,28 @@ fn receive_propagated_commands(
   db: database.Database,
   initial_buffer: BitArray,
 ) -> Nil {
-  // Process any commands in the initial buffer first
-  let buffer = process_buffer(initial_buffer, socket, db)
+  // Process any commands in the initial buffer first (offset starts at 0)
+  let #(buffer, offset) = process_buffer(initial_buffer, socket, db, 0)
 
   // Loop to receive more commands
-  receive_loop(socket, db, buffer)
+  receive_loop(socket, db, buffer, offset)
 }
 
 fn receive_loop(
   socket: mug.Socket,
   db: database.Database,
   buffer: BitArray,
+  offset: Int,
 ) -> Nil {
   case mug.receive(socket, timeout_milliseconds: 60_000) {
     Ok(data) -> {
       let combined = bit_array.append(buffer, data)
-      let new_buffer = process_buffer(combined, socket, db)
-      receive_loop(socket, db, new_buffer)
+      let #(new_buffer, new_offset) = process_buffer(combined, socket, db, offset)
+      receive_loop(socket, db, new_buffer, new_offset)
     }
     Error(_) -> {
       // Timeout or error, just continue waiting
-      receive_loop(socket, db, buffer)
+      receive_loop(socket, db, buffer, offset)
     }
   }
 }
@@ -175,29 +176,43 @@ fn process_buffer(
   buffer: BitArray,
   socket: mug.Socket,
   db: database.Database,
-) -> BitArray {
+  offset: Int,
+) -> #(BitArray, Int) {
   let #(commands, leftover) = resp.parse_all(buffer)
-  list.each(commands, fn(resp_cmd) {
-    case command.parse(resp_cmd) {
-      Ok(cmd) -> {
-        case is_replconf_getack(cmd) {
-          True -> {
-            io.println("Received REPLCONF GETACK, sending ACK")
-            send_replconf_ack(socket)
-          }
-          False -> {
-            io.println("Processing propagated command")
-            database.apply_command_silent(db, cmd)
+
+  // Process each command and accumulate the offset
+  let final_offset =
+    list.fold(commands, offset, fn(current_offset, resp_cmd) {
+      // Calculate byte length of this command
+      let cmd_bytes = resp.to_bit_array(resp_cmd)
+      let cmd_length = bit_array.byte_size(cmd_bytes)
+
+      case command.parse(resp_cmd) {
+        Ok(cmd) -> {
+          case is_replconf_getack(cmd) {
+            True -> {
+              // Send ACK with current offset (before adding this GETACK command)
+              io.println("Received REPLCONF GETACK, sending ACK with offset: " <> int.to_string(current_offset))
+              send_replconf_ack(socket, current_offset)
+              // Now increment offset by this GETACK command's byte length
+              current_offset + cmd_length
+            }
+            False -> {
+              // Process command silently, then increment offset
+              io.println("Processing propagated command, offset: " <> int.to_string(current_offset))
+              database.apply_command_silent(db, cmd)
+              current_offset + cmd_length
+            }
           }
         }
+        Error(_) -> {
+          io.println("Failed to parse propagated command")
+          current_offset
+        }
       }
-      Error(_) -> {
-        io.println("Failed to parse propagated command")
-        Nil
-      }
-    }
-  })
-  leftover
+    })
+
+  #(leftover, final_offset)
 }
 
 /// Check if a command is REPLCONF GETACK
@@ -217,14 +232,15 @@ fn is_replconf_getack(cmd: command.Command) -> Bool {
   }
 }
 
-/// Send REPLCONF ACK 0 response to master
-fn send_replconf_ack(socket: mug.Socket) -> Nil {
-  // Build RESP array: ["REPLCONF", "ACK", "0"]
+/// Send REPLCONF ACK <offset> response to master
+fn send_replconf_ack(socket: mug.Socket, offset: Int) -> Nil {
+  // Build RESP array: ["REPLCONF", "ACK", "<offset>"]
+  let offset_str = int.to_string(offset)
   let response =
     resp.Array([
       resp.BulkString(<<"REPLCONF":utf8>>),
       resp.BulkString(<<"ACK":utf8>>),
-      resp.BulkString(<<"0":utf8>>),
+      resp.BulkString(bit_array.from_string(offset_str)),
     ])
     |> resp.to_bit_array()
 
