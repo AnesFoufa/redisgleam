@@ -113,10 +113,6 @@ pub fn apply_command_silent(db: Database, cmd: command.Command) -> Nil {
   }
 }
 
-pub fn update_data(db: Database, data: dict.Dict(BitArray, Item)) {
-  process.call_forever(db.inner, message(UpdateDate(data)))
-}
-
 pub fn register(db: Database, subject) {
   process.call_forever(db.inner, message(Register(subject)))
 }
@@ -201,7 +197,7 @@ fn read_data_from_file(subject: Subject(Message), config: Config) {
       let assert Ok(content) = file_stream.read_remaining_bytes(stream)
       let assert Ok(rdb) = rdb.from_bit_array(content)
       let assert Ok(data) = rdb.databases |> list.first
-      process.call_forever(subject, message(UpdateDate(data)))
+      process.call_forever(subject, message(UpdateData(data)))
     },
     False,
   )
@@ -228,7 +224,7 @@ type Command {
     duration_ms: option.Option(Int),
   )
   Keys
-  UpdateDate(data: dict.Dict(BitArray, Item))
+  UpdateData(data: dict.Dict(BitArray, Item))
   Register(subject: process.Subject(BitArray))
   Psync
 }
@@ -247,7 +243,7 @@ fn message_handler(message: Message, state: DatabaseState) {
         Set(key, value, duration, duration_ms) ->
           handle_set(key, value, duration, duration_ms, state)
         Keys -> handle_keys(state)
-        UpdateDate(incoming_data) -> handle_update_data(incoming_data, state)
+        UpdateData(incoming_data) -> handle_update_data(incoming_data, state)
         Register(subject) -> handle_register(subject, state)
         Psync -> handle_psync(sender, state)
       }
