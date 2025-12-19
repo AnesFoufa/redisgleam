@@ -50,8 +50,7 @@ pub fn start(config: Config) -> Database {
   let ets_table = ets.new("redis_data")
 
   let replication_queue = ReplicationQueue([], timestamp.system_time())
-  let state =
-    DatabaseState(ets_table, dict.new(), replication_state, replication_queue)
+  let state = DatabaseState(ets_table, replication_state, replication_queue)
   let assert Ok(subject) = actor.start(state, message_handler)
   read_data_from_file(subject, config)
   start_flush_timer(subject)
@@ -144,15 +143,15 @@ fn set(
   db: Database,
   key: BitArray,
   value: resp.Resp,
-  duration: option.Option(Int),
+  duration_ms: option.Option(Int),
 ) -> resp.Resp {
-  let duration_ms = duration |> option.map(fn(x) { int.max(x, 0) })
+  let duration_ms_validated = duration_ms |> option.map(fn(x) { int.max(x, 0) })
   let duration =
-    duration_ms
+    duration_ms_validated
     |> option.map(duration.milliseconds)
   process.call_forever(
     db.inner,
-    message(Set(key, value, duration, duration_ms)),
+    message(Set(key, value, duration, duration_ms_validated)),
   )
 }
 
@@ -183,7 +182,6 @@ type ReplicationQueue {
 type DatabaseState {
   DatabaseState(
     ets_table: atom.Atom,
-    data: dict.Dict(BitArray, Item),
     replication_state: ReplicationState,
     replication_queue: ReplicationQueue,
   )
@@ -216,7 +214,6 @@ fn message(command: Command) {
 }
 
 type Command {
-  Get(key: BitArray)
   Set(
     key: BitArray,
     value: resp.Resp,
@@ -239,7 +236,6 @@ fn message_handler(message: Message, state: DatabaseState) {
     // Synchronous commands with response
     Message(command, sender) -> {
       let #(response, state) = case command {
-        Get(key) -> handle_get(key, state)
         Set(key, value, duration, duration_ms) ->
           handle_set(key, value, duration, duration_ms, state)
         Keys -> handle_keys(state)
@@ -265,40 +261,13 @@ fn message_handler(message: Message, state: DatabaseState) {
       let state = case command {
         AsyncCleanup(key) -> {
           ets.delete(state.ets_table, key)
-          let data = dict.delete(state.data, key)
-          DatabaseState(..state, data:)
+          state
         }
         FlushReplication -> flush_replication_queue(state)
       }
       actor.continue(state)
     }
   }
-}
-
-fn handle_get(
-  key: BitArray,
-  state: DatabaseState,
-) -> #(resp.Resp, DatabaseState) {
-  let #(response, state) =
-    state.data
-    |> dict.get(key)
-    |> result.map(fn(item) {
-      case item.expires_at {
-        option.None -> #(item.value, state)
-        option.Some(expires_at) -> {
-          case timestamp.compare(timestamp.system_time(), expires_at) {
-            order.Gt -> {
-              let data = dict.delete(state.data, key)
-              let state = DatabaseState(..state, data:)
-              #(resp.Null, state)
-            }
-            _ -> #(item.value, state)
-          }
-        }
-      }
-    })
-    |> result.unwrap(or: #(resp.Null, state))
-  #(response, state)
 }
 
 fn handle_set(
@@ -315,20 +284,16 @@ fn handle_set(
   // Write to ETS immediately (fast!)
   ets.insert(state.ets_table, key, item)
 
-  // Update dict for consistency
-  let data = state.data |> dict.insert(key, item)
-
   // Queue for async replication
   let state = queue_for_replication(key, value, duration_ms, state)
 
-  let state = DatabaseState(..state, data:)
   let response = resp.SimpleString(<<"OK">>)
   #(response, state)
 }
 
 fn handle_keys(state: DatabaseState) -> #(resp.Resp, DatabaseState) {
   let response =
-    dict.keys(state.data) |> list.map(resp.BulkString) |> resp.Array
+    ets.all_keys(state.ets_table) |> list.map(resp.BulkString) |> resp.Array
   #(response, state)
 }
 
@@ -337,14 +302,12 @@ fn handle_update_data(
   state: DatabaseState,
 ) -> #(resp.Resp, DatabaseState) {
   let response = resp.SimpleString(<<"OK">>)
-  let data = dict.merge(incoming_data, state.data)
-  // Also update ETS
+  // Load all data into ETS
   dict.to_list(incoming_data)
   |> list.each(fn(entry) {
     let #(key, item) = entry
     ets.insert(state.ets_table, key, item)
   })
-  let state = DatabaseState(..state, data:)
   #(response, state)
 }
 

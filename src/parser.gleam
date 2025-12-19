@@ -31,10 +31,6 @@ pub fn return(val: a) -> Parser(a) {
   Parser(fn(input) { Ok(#(val, input)) })
 }
 
-pub fn input() -> Parser(BitArray) {
-  Parser(fn(inp) { Ok(#(inp, inp)) })
-}
-
 pub fn bind(p: Parser(a), f: fn(a) -> Parser(b)) -> Parser(b) {
   Parser(fn(input) {
     case p.parse(input) {
