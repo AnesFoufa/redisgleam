@@ -92,10 +92,10 @@ pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
 }
 
 fn wait(db: Database) -> Resp {
-  // For now, return 0 (simple case: 0 replicas needed, 0 replicas connected)
-  // TODO: Track number of replicas and wait for ACKs in future stages
-  let _ = db
-  resp.Integer(0)
+  // Return the number of connected replicas
+  // For now, ignore numreplicas and timeout arguments
+  // All replicas are in sync since no write commands have been sent yet
+  get_replica_count(db)
 }
 
 /// Apply a command silently (no response). Used for processing propagated commands from master.
@@ -171,6 +171,10 @@ fn psync(db: Database) {
   process.call_forever(db.inner, message(Psync))
 }
 
+fn get_replica_count(db: Database) -> resp.Resp {
+  process.call_forever(db.inner, message(GetReplicaCount))
+}
+
 type ReplicationState {
   Master(
     subjects_registry: dict.Dict(process.Pid, process.Subject(BitArray)),
@@ -199,11 +203,31 @@ fn read_data_from_file(subject: Subject(Message), config: Config) {
   process.start(
     fn() {
       let path = filepath.join(config.dir, config.db_filename)
-      let assert Ok(stream) = file_stream.open_read(path)
-      let assert Ok(content) = file_stream.read_remaining_bytes(stream)
-      let assert Ok(rdb) = rdb.from_bit_array(content)
-      let assert Ok(data) = rdb.databases |> list.first
-      process.call_forever(subject, message(UpdateData(data)))
+      case file_stream.open_read(path) {
+        Ok(stream) -> {
+          case file_stream.read_remaining_bytes(stream) {
+            Ok(content) -> {
+              case rdb.from_bit_array(content) {
+                Ok(rdb_data) -> {
+                  case rdb_data.databases |> list.first {
+                    Ok(data) -> {
+                      let _ = process.call_forever(subject, message(UpdateData(data)))
+                      Nil
+                    }
+                    Error(_) -> Nil
+                  }
+                }
+                Error(_) -> Nil
+              }
+            }
+            Error(_) -> Nil
+          }
+        }
+        Error(_) -> {
+          // File doesn't exist, start with empty database
+          Nil
+        }
+      }
     },
     False,
   )
@@ -232,6 +256,7 @@ type Command {
   UpdateData(data: dict.Dict(BitArray, Item))
   Register(subject: process.Subject(BitArray))
   Psync
+  GetReplicaCount
 }
 
 type AsyncCommand {
@@ -250,6 +275,7 @@ fn message_handler(message: Message, state: DatabaseState) {
         UpdateData(incoming_data) -> handle_update_data(incoming_data, state)
         Register(subject) -> handle_register(subject, state)
         Psync -> handle_psync(sender, state)
+        GetReplicaCount -> handle_get_replica_count(state)
       }
       process.send(sender, response)
 
@@ -356,6 +382,17 @@ fn handle_psync(
     resp.SimpleString(bit_array.from_string(
       "FULLRESYNC " <> default_repl_id <> " 0",
     ))
+  #(response, state)
+}
+
+fn handle_get_replica_count(
+  state: DatabaseState,
+) -> #(resp.Resp, DatabaseState) {
+  let count = case state.replication_state {
+    Master(_, slaves) -> list.length(slaves)
+    Slave(_, _) -> 0
+  }
+  let response = resp.Integer(count)
   #(response, state)
 }
 
