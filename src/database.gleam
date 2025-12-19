@@ -6,7 +6,6 @@ import gleam/dict
 import gleam/erlang/atom
 import gleam/erlang/process.{type Subject}
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option}
 import gleam/order
@@ -472,22 +471,12 @@ fn handle_ack(
   offset: Int,
   state: DatabaseState,
 ) -> #(resp.Resp, DatabaseState) {
-  io.println(
-    "handle_ack: received ACK from PID with offset " <> int.to_string(offset),
-  )
   case state.replication_state {
     Master(registry, slaves, master_offset, wait_state) -> {
       case wait_state {
         option.Some(wait) -> {
-          io.println(
-            "handle_ack: active WAIT with target offset "
-            <> int.to_string(wait.target_offset),
-          )
           // Update ACKs received
           let new_acks = dict.insert(wait.acks_received, pid, offset)
-          io.println(
-            "handle_ack: now have " <> int.to_string(dict.size(new_acks)) <> " ACKs",
-          )
           let new_wait = WaitState(..wait, acks_received: new_acks)
           let new_repl =
             Master(registry, slaves, master_offset, option.Some(new_wait))
@@ -495,7 +484,6 @@ fn handle_ack(
           #(resp.SimpleString(<<"OK">>), new_state)
         }
         option.None -> {
-          io.println("handle_ack: no active WAIT, ignoring ACK")
           // No active WAIT, just acknowledge
           #(resp.SimpleString(<<"OK">>), state)
         }
@@ -556,15 +544,8 @@ fn handle_check_wait_progress(
       case wait_state {
         option.Some(wait) -> {
           let in_sync_count = count_in_sync_replicas(wait)
-          io.println(
-            "check_wait_progress: "
-            <> int.to_string(in_sync_count)
-            <> " in sync, need "
-            <> int.to_string(numreplicas),
-          )
           case in_sync_count >= numreplicas {
             True -> {
-              io.println("check_wait_progress: COMPLETE, returning count")
               // Enough replicas acknowledged - clear wait state
               let new_repl =
                 Master(registry, slaves, master_offset, option.None)
@@ -572,14 +553,12 @@ fn handle_check_wait_progress(
               #(resp.Integer(in_sync_count), new_state)
             }
             False -> {
-              io.println("check_wait_progress: still waiting")
               // Still waiting
               #(resp.SimpleString(<<"IN_PROGRESS">>), state)
             }
           }
         }
         option.None -> {
-          io.println("check_wait_progress: no active WAIT, returning 0")
           // No active wait - shouldn't happen, but return 0
           #(resp.Integer(0), state)
         }
@@ -598,16 +577,12 @@ fn handle_get_wait_count(
       case wait_state {
         option.Some(wait) -> {
           let count = count_in_sync_replicas(wait)
-          io.println(
-            "get_wait_count: returning " <> int.to_string(count) <> " and clearing wait_state",
-          )
           // Clear wait_state since we're returning the final count
           let new_repl = Master(registry, slaves, master_offset, option.None)
           let new_state = DatabaseState(..state, replication_state: new_repl)
           #(resp.Integer(count), new_state)
         }
         option.None -> {
-          io.println("get_wait_count: no active WAIT")
           #(resp.Integer(0), state)
         }
       }
