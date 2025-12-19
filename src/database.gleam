@@ -103,29 +103,33 @@ fn wait(db: Database, numreplicas: Int, timeout: Int) -> Resp {
   case response {
     // If master offset is 0, we got the final count immediately
     resp.Integer(_) -> response
-    // Otherwise, poll for completion
-    _ -> wait_loop(db, numreplicas, timeout, 0)
-  }
-}
+    // Otherwise, wait on channel with timeout
+    _ -> {
+      let selector =
+        process.new_selector()
+        |> process.selecting(response_channel, fn(count) {
+          option.Some(count)
+        })
 
-fn wait_loop(db: Database, numreplicas: Int, timeout: Int, elapsed: Int) -> Resp {
-  // Check if timeout expired
-  case elapsed >= timeout {
-    True -> {
-      // Timeout - get current count regardless of threshold
-      process.call_forever(db.inner, message(GetWaitCount))
-    }
-    False -> {
-      // Check current progress
-      let result =
-        process.call_forever(db.inner, message(CheckWaitProgress(numreplicas)))
-      case result {
-        resp.Integer(_) -> result
-        // Still waiting
+      let result = case timeout {
+        0 -> {
+          // Infinite timeout - wait forever
+          process.select_forever(selector) |> Ok
+        }
         _ -> {
-          // Sleep 10ms and check again
-          process.sleep(10)
-          wait_loop(db, numreplicas, timeout, elapsed + 10)
+          // Wait with timeout
+          process.select(selector, timeout)
+        }
+      }
+
+      case result {
+        Ok(option.Some(count)) -> {
+          // Got response before timeout
+          resp.Integer(count)
+        }
+        Ok(option.None) | Error(Nil) -> {
+          // Timeout expired - get current count
+          process.call_forever(db.inner, message(GetWaitCount))
         }
       }
     }
@@ -486,6 +490,10 @@ fn handle_ack(
           let new_repl =
             Master(registry, slaves, master_offset, option.Some(new_wait))
           let new_state = DatabaseState(..state, replication_state: new_repl)
+
+          // Check and notify immediately if threshold is met
+          let new_state = check_and_notify_wait_if_ready(new_state)
+
           #(resp.SimpleString(<<"OK">>), new_state)
         }
         option.None -> {
@@ -514,6 +522,8 @@ fn handle_start_wait(
         0 -> {
           // No writes yet, all replicas are in sync
           let count = list.length(slaves)
+          // Send to channel immediately
+          process.send(response_channel, count)
           #(resp.Integer(count), state)
         }
         _ -> {
@@ -538,7 +548,11 @@ fn handle_start_wait(
         }
       }
     }
-    Slave(_, _) -> #(resp.Integer(0), state)
+    Slave(_, _) -> {
+      // Slaves don't wait - return 0 immediately
+      process.send(response_channel, 0)
+      #(resp.Integer(0), state)
+    }
   }
 }
 
@@ -607,6 +621,32 @@ fn count_in_sync_replicas(wait: WaitState) -> Int {
       False -> count
     }
   })
+}
+
+fn check_and_notify_wait_if_ready(state: DatabaseState) -> DatabaseState {
+  case state.replication_state {
+    Master(registry, slaves, master_offset, wait_state) -> {
+      case wait_state {
+        option.Some(wait) -> {
+          let in_sync_count = count_in_sync_replicas(wait)
+
+          case in_sync_count >= wait.numreplicas {
+            True -> {
+              // Notify immediately!
+              process.send(wait.response_channel, in_sync_count)
+
+              // Clear wait state
+              let new_repl = Master(registry, slaves, master_offset, option.None)
+              DatabaseState(..state, replication_state: new_repl)
+            }
+            False -> state
+          }
+        }
+        option.None -> state
+      }
+    }
+    Slave(_, _) -> state
+  }
 }
 
 // Flush the replication queue to all slaves
