@@ -222,7 +222,6 @@ type WaitState {
     target_offset: Int,
     numreplicas: Int,
     acks_received: dict.Dict(process.Pid, Int),
-    wait_start: timestamp.Timestamp,
     response_channel: process.Subject(Int),
   )
 }
@@ -311,7 +310,6 @@ type Command {
     timeout: Int,
     response_channel: process.Subject(Int),
   )
-  CheckWaitProgress(numreplicas: Int)
   GetWaitCount
 }
 
@@ -334,8 +332,6 @@ fn message_handler(message: Message, state: DatabaseState) {
         HandleAck(pid, offset) -> handle_ack(pid, offset, state)
         StartWait(numreplicas, timeout, response_channel) ->
           handle_start_wait(numreplicas, timeout, state, response_channel)
-        CheckWaitProgress(numreplicas) ->
-          handle_check_wait_progress(numreplicas, state)
         GetWaitCount -> handle_get_wait_count(state)
       }
       process.send(sender, response)
@@ -536,14 +532,13 @@ fn handle_start_wait(
               target_offset: master_offset,
               numreplicas:,
               acks_received: dict.new(),
-              wait_start: timestamp.system_time(),
               response_channel:,
             )
           let replication_state =
             Master(registry, slaves, master_offset, option.Some(wait_state))
           let new_state = DatabaseState(..state, replication_state:)
 
-          // Return a placeholder - the actual response comes from CheckWaitProgress
+          // Return placeholder - actual response comes via response_channel when ACKs arrive
           #(resp.SimpleString(<<"WAITING">>), new_state)
         }
       }
@@ -553,41 +548,6 @@ fn handle_start_wait(
       process.send(response_channel, 0)
       #(resp.Integer(0), state)
     }
-  }
-}
-
-fn handle_check_wait_progress(
-  numreplicas: Int,
-  state: DatabaseState,
-) -> #(resp.Resp, DatabaseState) {
-  case state.replication_state {
-    Master(registry, slaves, master_offset, wait_state) -> {
-      case wait_state {
-        option.Some(wait) -> {
-          let in_sync_count = count_in_sync_replicas(wait)
-          case in_sync_count >= numreplicas {
-            True -> {
-              // Enough replicas acknowledged - clear wait state
-              process.send(wait.response_channel, in_sync_count)
-              let new_repl =
-                Master(registry, slaves, master_offset, option.None)
-              let new_state =
-                DatabaseState(..state, replication_state: new_repl)
-              #(resp.Integer(in_sync_count), new_state)
-            }
-            False -> {
-              // Still waiting
-              #(resp.SimpleString(<<"IN_PROGRESS">>), state)
-            }
-          }
-        }
-        option.None -> {
-          // No active wait - shouldn't happen, but return 0
-          #(resp.Integer(0), state)
-        }
-      }
-    }
-    Slave(_, _) -> #(resp.Integer(0), state)
   }
 }
 
