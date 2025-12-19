@@ -160,7 +160,8 @@ fn receive_loop(
   case mug.receive(socket, timeout_milliseconds: 60_000) {
     Ok(data) -> {
       let combined = bit_array.append(buffer, data)
-      let #(new_buffer, new_offset) = process_buffer(combined, socket, db, offset)
+      let #(new_buffer, new_offset) =
+        process_buffer(combined, socket, db, offset)
       receive_loop(socket, db, new_buffer, new_offset)
     }
     Error(_) -> {
@@ -190,21 +191,18 @@ fn process_buffer(
           case is_replconf_getack(cmd) {
             True -> {
               // Send ACK with current offset (before adding this GETACK command)
-              io.println("Received REPLCONF GETACK, sending ACK with offset: " <> int.to_string(current_offset))
               send_replconf_ack(socket, current_offset)
               // Now increment offset by this GETACK command's byte length
               current_offset + cmd_length
             }
             False -> {
               // Process command silently, then increment offset
-              io.println("Processing propagated command, offset: " <> int.to_string(current_offset))
               database.apply_command_silent(db, cmd)
               current_offset + cmd_length
             }
           }
         }
         Error(_) -> {
-          io.println("Failed to parse propagated command")
           current_offset
         }
       }

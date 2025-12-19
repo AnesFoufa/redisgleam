@@ -96,7 +96,8 @@ pub fn parse(input: Resp) -> Result(Command, resp.Resp) {
       }
     }
     "psync", _ -> Ok(Psync)
-    "wait", [resp.BulkString(numreplicas_bytes), resp.BulkString(timeout_bytes)] -> {
+    "wait", [resp.BulkString(numreplicas_bytes), resp.BulkString(timeout_bytes)]
+    -> {
       use numreplicas <- result.try(
         numreplicas_bytes
         |> bit_array.to_string()
@@ -152,7 +153,9 @@ fn parse_replconf(args: List(resp.Resp)) -> Result(ReplConfCommand, resp.Resp) {
               case bit_array.to_string(val) |> result.try(int.parse) {
                 Ok(offset) -> Ok(ReplConfAck(offset))
                 Error(_) ->
-                  Error(resp.SimpleError(<<"Expected valid integer for ACK offset">>))
+                  Error(
+                    resp.SimpleError(<<"Expected valid integer for ACK offset">>),
+                  )
               }
             }
             "getack" -> Ok(ReplConfGetAck)

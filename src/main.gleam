@@ -25,16 +25,33 @@ pub fn main() {
     glisten.handler(
       fn(_conn) {
         let subject = process.new_subject()
-        database.register(db, subject)
         let selector =
           process.new_selector() |> process.selecting(subject, fn(x) { x })
-        #(db, option.Some(selector))
+        #(subject, option.Some(selector))
       },
-      handle_message,
+      make_handler(db),
     )
     |> glisten.serve(config.port)
 
   process.sleep_forever()
+}
+
+fn make_handler(db: database.Database) {
+  fn(msg, subject, conn) {
+    io.println("Received message!")
+
+    let updated_subject = case msg {
+      glisten.Packet(data) -> {
+        io.println("Received packet")
+        handle_packet(data, db, subject, conn)
+      }
+      glisten.User(stream) -> {
+        io.println("Received stream")
+        handle_user_message(stream, subject, conn)
+      }
+    }
+    actor.continue(updated_subject)
+  }
 }
 
 fn config_decoder() {
@@ -70,55 +87,60 @@ fn config_decoder() {
   }
 }
 
-fn handle_message(msg, db, conn) {
-  io.println("Received message!")
-
-  case msg {
-    glisten.Packet(msg) -> {
-      io.println("Received packet")
-
-      // Parse the command
-      let result =
-        resp.from_bit_array(msg)
-        |> result.map(command.parse)
-        |> result.map_error(resp.SimpleError)
-        |> result.flatten()
-
-      // Handle command with appropriate response type
-      case result {
-        Ok(cmd) -> {
-          case database.handle_command(db, cmd) {
-            database.SendResponse(response) -> {
-              let response_data = resp.to_bit_array(response)
-              let assert Ok(_) =
-                glisten.send(conn, response_data |> bytes_tree.from_bit_array)
-              actor.continue(db)
-            }
-            database.Silent -> {
-              // No response sent
-              actor.continue(db)
-            }
-            database.Stream(data) -> {
-              // Send stream data (currently unused, but ready for future)
-              let assert Ok(_) =
-                glisten.send(conn, data |> bytes_tree.from_bit_array)
-              actor.continue(db)
-            }
-          }
-        }
-        Error(error) -> {
-          // Send error response
-          let response_data = resp.to_bit_array(error)
-          let assert Ok(_) =
-            glisten.send(conn, response_data |> bytes_tree.from_bit_array)
-          actor.continue(db)
-        }
-      }
+fn handle_packet(
+  data: BitArray,
+  db: database.Database,
+  subject: process.Subject(BitArray),
+  conn,
+) -> process.Subject(BitArray) {
+  case parse_command(data) {
+    Ok(cmd) -> {
+      execute_and_respond(cmd, db, subject, conn)
+      subject
     }
-    glisten.User(stream) -> {
-      io.println("Received stream")
-      let assert Ok(_) = glisten.send(conn, stream |> bytes_tree.from_bit_array)
-      actor.continue(db)
+    Error(error) -> {
+      send_error(error, conn)
+      subject
     }
   }
+}
+
+fn parse_command(data: BitArray) -> Result(command.Command, resp.Resp) {
+  resp.from_bit_array(data)
+  |> result.map(command.parse)
+  |> result.map_error(resp.SimpleError)
+  |> result.flatten()
+}
+
+fn execute_and_respond(
+  cmd: command.Command,
+  db: database.Database,
+  subject: process.Subject(BitArray),
+  conn,
+) -> Nil {
+  case database.handle_command(db, cmd, subject) {
+    database.SendResponse(response) -> send_response(response, conn)
+    database.Silent -> Nil
+  }
+}
+
+fn send_response(response: resp.Resp, conn) -> Nil {
+  let data = resp.to_bit_array(response)
+  let assert Ok(_) = glisten.send(conn, data |> bytes_tree.from_bit_array)
+  Nil
+}
+
+fn send_error(error: resp.Resp, conn) -> Nil {
+  let data = resp.to_bit_array(error)
+  let assert Ok(_) = glisten.send(conn, data |> bytes_tree.from_bit_array)
+  Nil
+}
+
+fn handle_user_message(
+  stream: BitArray,
+  subject: process.Subject(BitArray),
+  conn,
+) -> process.Subject(BitArray) {
+  let assert Ok(_) = glisten.send(conn, stream |> bytes_tree.from_bit_array)
+  subject
 }
