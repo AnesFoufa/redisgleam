@@ -6,6 +6,8 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option
+import gleam/result
+import gleam/string
 import mug
 import resp
 
@@ -145,7 +147,7 @@ fn receive_propagated_commands(
   initial_buffer: BitArray,
 ) -> Nil {
   // Process any commands in the initial buffer first
-  let buffer = process_buffer(initial_buffer, db)
+  let buffer = process_buffer(initial_buffer, socket, db)
 
   // Loop to receive more commands
   receive_loop(socket, db, buffer)
@@ -159,7 +161,7 @@ fn receive_loop(
   case mug.receive(socket, timeout_milliseconds: 60_000) {
     Ok(data) -> {
       let combined = bit_array.append(buffer, data)
-      let new_buffer = process_buffer(combined, db)
+      let new_buffer = process_buffer(combined, socket, db)
       receive_loop(socket, db, new_buffer)
     }
     Error(_) -> {
@@ -169,13 +171,25 @@ fn receive_loop(
   }
 }
 
-fn process_buffer(buffer: BitArray, db: database.Database) -> BitArray {
+fn process_buffer(
+  buffer: BitArray,
+  socket: mug.Socket,
+  db: database.Database,
+) -> BitArray {
   let #(commands, leftover) = resp.parse_all(buffer)
   list.each(commands, fn(resp_cmd) {
     case command.parse(resp_cmd) {
       Ok(cmd) -> {
-        io.println("Processing propagated command")
-        database.apply_command_silent(db, cmd)
+        case is_replconf_getack(cmd) {
+          True -> {
+            io.println("Received REPLCONF GETACK, sending ACK")
+            send_replconf_ack(socket)
+          }
+          False -> {
+            io.println("Processing propagated command")
+            database.apply_command_silent(db, cmd)
+          }
+        }
       }
       Error(_) -> {
         io.println("Failed to parse propagated command")
@@ -184,4 +198,41 @@ fn process_buffer(buffer: BitArray, db: database.Database) -> BitArray {
     }
   })
   leftover
+}
+
+/// Check if a command is REPLCONF GETACK
+fn is_replconf_getack(cmd: command.Command) -> Bool {
+  case cmd {
+    command.ReplConf(args) -> {
+      case args {
+        [resp.BulkString(arg1), resp.BulkString(arg2)] -> {
+          let arg1_str = bit_array.to_string(arg1) |> result.unwrap("")
+          let arg2_str = bit_array.to_string(arg2) |> result.unwrap("")
+          string.lowercase(arg1_str) == "getack" && arg2_str == "*"
+        }
+        _ -> False
+      }
+    }
+    _ -> False
+  }
+}
+
+/// Send REPLCONF ACK 0 response to master
+fn send_replconf_ack(socket: mug.Socket) -> Nil {
+  // Build RESP array: ["REPLCONF", "ACK", "0"]
+  let response =
+    resp.Array([
+      resp.BulkString(<<"REPLCONF":utf8>>),
+      resp.BulkString(<<"ACK":utf8>>),
+      resp.BulkString(<<"0":utf8>>),
+    ])
+    |> resp.to_bit_array()
+
+  case mug.send(socket, response) {
+    Ok(_) -> Nil
+    Error(_) -> {
+      io.println("Failed to send REPLCONF ACK")
+      Nil
+    }
+  }
 }
