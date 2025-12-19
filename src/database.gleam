@@ -40,6 +40,12 @@ pub type Config {
   )
 }
 
+pub type CommandResponse {
+  SendResponse(Resp)
+  Silent
+  Stream(BitArray)
+}
+
 pub fn start(config: Config) -> Database {
   let replication_state = case config.replicaof {
     option.Some(#(master_host, master_port)) -> Slave(master_host, master_port)
@@ -57,7 +63,21 @@ pub fn start(config: Config) -> Database {
   Database(inner: subject, config:, ets_table:)
 }
 
-pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
+pub fn handle_command(db: Database, cmd: command.Command) -> CommandResponse {
+  case cmd {
+    // ACK is silent - no response sent to client
+    command.ReplConf(command.ReplConfAck(offset)) -> {
+      let pid = process.self()
+      handle_ack_from_replica(db, pid, offset)
+      Silent
+    }
+    // All other commands send normal response
+    // PSYNC continues to use post-processing for RDB streaming
+    _ -> SendResponse(handle_regular_command(db, cmd))
+  }
+}
+
+fn handle_regular_command(db: Database, cmd: command.Command) -> Resp {
   case cmd {
     command.Ping -> resp.SimpleString(<<"PONG">>)
     command.Echo(value) -> value
@@ -84,7 +104,16 @@ pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
           ))
       }
     }
-    command.ReplConf(_replconf_cmd) -> resp.SimpleString(<<"OK">>)
+    command.ReplConf(command.ReplConfGetAck) -> {
+      // Respond with REPLCONF ACK <offset>
+      // For now, replicas track offset in replication loop, so return 0
+      resp.Array([
+        resp.BulkString(<<"REPLCONF">>),
+        resp.BulkString(<<"ACK">>),
+        resp.BulkString(<<"0">>),
+      ])
+    }
+    command.ReplConf(_) -> resp.SimpleString(<<"OK">>)
     command.Psync -> psync(db)
     command.Keys -> keys(db)
     command.Wait(numreplicas, timeout) -> wait(db, numreplicas, timeout)
@@ -107,9 +136,7 @@ fn wait(db: Database, numreplicas: Int, timeout: Int) -> Resp {
     _ -> {
       let selector =
         process.new_selector()
-        |> process.selecting(response_channel, fn(count) {
-          option.Some(count)
-        })
+        |> process.selecting(response_channel, fn(count) { option.Some(count) })
 
       let result = case timeout {
         0 -> {
@@ -166,8 +193,9 @@ pub fn handle_ack_from_replica(
   db: Database,
   pid: process.Pid,
   offset: Int,
-) -> Resp {
-  process.call_forever(db.inner, message(HandleAck(pid, offset)))
+) -> Nil {
+  let _ = process.call_forever(db.inner, message(HandleAck(pid, offset)))
+  Nil
 }
 
 // FAST PATH: Read directly from ETS (no actor bottleneck!)
@@ -596,7 +624,8 @@ fn check_and_notify_wait_if_ready(state: DatabaseState) -> DatabaseState {
               process.send(wait.response_channel, in_sync_count)
 
               // Clear wait state
-              let new_repl = Master(registry, slaves, master_offset, option.None)
+              let new_repl =
+                Master(registry, slaves, master_offset, option.None)
               DatabaseState(..state, replication_state: new_repl)
             }
             False -> state

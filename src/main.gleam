@@ -84,22 +84,33 @@ fn handle_message(msg, db, conn) {
         |> result.map_error(resp.SimpleError)
         |> result.flatten()
 
-      // Check if it's an ACK - handle silently without response
+      // Handle command with appropriate response type
       case result {
-        Ok(command.ReplConf(command.ReplConfAck(offset))) -> {
-          let pid = process.self()
-          let _ = database.handle_ack_from_replica(db, pid, offset)
-          actor.continue(db)
+        Ok(cmd) -> {
+          case database.handle_command(db, cmd) {
+            database.SendResponse(response) -> {
+              let response_data = resp.to_bit_array(response)
+              let assert Ok(_) =
+                glisten.send(conn, response_data |> bytes_tree.from_bit_array)
+              actor.continue(db)
+            }
+            database.Silent -> {
+              // No response sent
+              actor.continue(db)
+            }
+            database.Stream(data) -> {
+              // Send stream data (currently unused, but ready for future)
+              let assert Ok(_) =
+                glisten.send(conn, data |> bytes_tree.from_bit_array)
+              actor.continue(db)
+            }
+          }
         }
-        _ -> {
-          // Normal command or error - send response
-          let response =
-            result
-            |> result.map(database.handle_command(db, _))
-            |> result.unwrap_both()
-            |> resp.to_bit_array()
+        Error(error) -> {
+          // Send error response
+          let response_data = resp.to_bit_array(error)
           let assert Ok(_) =
-            glisten.send(conn, response |> bytes_tree.from_bit_array)
+            glisten.send(conn, response_data |> bytes_tree.from_bit_array)
           actor.continue(db)
         }
       }
