@@ -252,34 +252,29 @@ fn read_data_from_file(subject: Subject(Message), config: Config) {
   process.start(
     fn() {
       let path = filepath.join(config.dir, config.db_filename)
-      case file_stream.open_read(path) {
-        Ok(stream) -> {
-          case file_stream.read_remaining_bytes(stream) {
-            Ok(content) -> {
-              case rdb.from_bit_array(content) {
-                Ok(rdb_data) -> {
-                  case rdb_data.databases |> list.first {
-                    Ok(data) -> {
-                      let _ = process.call_forever(subject, message(UpdateData(data)))
-                      Nil
-                    }
-                    Error(_) -> Nil
-                  }
-                }
-                Error(_) -> Nil
-              }
-            }
-            Error(_) -> Nil
-          }
-        }
-        Error(_) -> {
-          // File doesn't exist, start with empty database
+      case load_rdb_data(path) {
+        Ok(data) -> {
+          let _ = process.call_forever(subject, message(UpdateData(data)))
           Nil
         }
+        Error(_) -> Nil
       }
     },
     False,
   )
+}
+
+fn load_rdb_data(path: String) -> Result(dict.Dict(BitArray, Item), Nil) {
+  use stream <- result.try(
+    file_stream.open_read(path) |> result.replace_error(Nil),
+  )
+  use content <- result.try(
+    file_stream.read_remaining_bytes(stream) |> result.replace_error(Nil),
+  )
+  use rdb_data <- result.try(
+    rdb.from_bit_array(content) |> result.replace_error(Nil),
+  )
+  rdb_data.databases |> list.first
 }
 
 type Message {
