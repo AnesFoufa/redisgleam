@@ -6,6 +6,7 @@ import gleam/dict
 import gleam/erlang/atom
 import gleam/erlang/process.{type Subject}
 import gleam/int
+import gleam/io
 import gleam/list
 import gleam/option.{type Option}
 import gleam/order
@@ -84,18 +85,56 @@ pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
           ))
       }
     }
-    command.ReplConf(_args) -> resp.SimpleString(<<"OK">>)
+    command.ReplConf(_replconf_cmd) -> resp.SimpleString(<<"OK">>)
     command.Psync -> psync(db)
     command.Keys -> keys(db)
-    command.Wait(_numreplicas, _timeout) -> wait(db)
+    command.Wait(numreplicas, timeout) -> wait(db, numreplicas, timeout)
   }
 }
 
-fn wait(db: Database) -> Resp {
-  // Return the number of connected replicas
-  // For now, ignore numreplicas and timeout arguments
-  // All replicas are in sync since no write commands have been sent yet
-  get_replica_count(db)
+fn wait(db: Database, numreplicas: Int, timeout: Int) -> Resp {
+  // Start the WAIT request
+  let response =
+    process.call_forever(db.inner, message(StartWait(numreplicas, timeout)))
+
+  case response {
+    // If master offset is 0, we got the final count immediately
+    resp.Integer(_) -> response
+    // Otherwise, poll for completion
+    _ -> wait_loop(db, numreplicas, timeout, 0)
+  }
+}
+
+fn wait_loop(
+  db: Database,
+  numreplicas: Int,
+  timeout: Int,
+  elapsed: Int,
+) -> Resp {
+  // Check if timeout expired
+  case elapsed >= timeout {
+    True -> {
+      // Timeout - get current count regardless of threshold
+      process.call_forever(db.inner, message(GetWaitCount))
+    }
+    False -> {
+      // Check current progress
+      let result =
+        process.call_forever(
+          db.inner,
+          message(CheckWaitProgress(numreplicas)),
+        )
+      case result {
+        resp.Integer(_) -> result
+        // Still waiting
+        _ -> {
+          // Sleep 10ms and check again
+          process.sleep(10)
+          wait_loop(db, numreplicas, timeout, elapsed + 10)
+        }
+      }
+    }
+  }
 }
 
 /// Apply a command silently (no response). Used for processing propagated commands from master.
@@ -122,6 +161,10 @@ pub fn apply_command_silent(db: Database, cmd: command.Command) -> Nil {
 
 pub fn register(db: Database, subject) {
   process.call_forever(db.inner, message(Register(subject)))
+}
+
+pub fn handle_ack_from_replica(db: Database, pid: process.Pid, offset: Int) -> Resp {
+  process.call_forever(db.inner, message(HandleAck(pid, offset)))
 }
 
 // FAST PATH: Read directly from ETS (no actor bottleneck!)
@@ -171,20 +214,27 @@ fn psync(db: Database) {
   process.call_forever(db.inner, message(Psync))
 }
 
-fn get_replica_count(db: Database) -> resp.Resp {
-  process.call_forever(db.inner, message(GetReplicaCount))
+type WaitState {
+  WaitState(
+    target_offset: Int,
+    numreplicas: Int,
+    acks_received: dict.Dict(process.Pid, Int),
+    wait_start: timestamp.Timestamp,
+  )
 }
 
 type ReplicationState {
   Master(
     subjects_registry: dict.Dict(process.Pid, process.Subject(BitArray)),
     slaves: List(process.Subject(BitArray)),
+    master_offset: Int,
+    wait_state: option.Option(WaitState),
   )
   Slave(master_host: String, master_port: Int)
 }
 
 fn master() -> ReplicationState {
-  Master(dict.new(), [])
+  Master(dict.new(), [], 0, option.None)
 }
 
 type ReplicationQueue {
@@ -256,7 +306,10 @@ type Command {
   UpdateData(data: dict.Dict(BitArray, Item))
   Register(subject: process.Subject(BitArray))
   Psync
-  GetReplicaCount
+  HandleAck(pid: process.Pid, offset: Int)
+  StartWait(numreplicas: Int, timeout: Int)
+  CheckWaitProgress(numreplicas: Int)
+  GetWaitCount
 }
 
 type AsyncCommand {
@@ -275,7 +328,12 @@ fn message_handler(message: Message, state: DatabaseState) {
         UpdateData(incoming_data) -> handle_update_data(incoming_data, state)
         Register(subject) -> handle_register(subject, state)
         Psync -> handle_psync(sender, state)
-        GetReplicaCount -> handle_get_replica_count(state)
+        HandleAck(pid, offset) -> handle_ack(pid, offset, state)
+        StartWait(numreplicas, timeout) ->
+          handle_start_wait(numreplicas, timeout, state)
+        CheckWaitProgress(numreplicas) ->
+          handle_check_wait_progress(numreplicas, state)
+        GetWaitCount -> handle_get_wait_count(state)
       }
       process.send(sender, response)
 
@@ -351,7 +409,7 @@ fn handle_register(
 ) -> #(resp.Resp, DatabaseState) {
   let response = resp.SimpleString(<<"Ok">>)
   case state.replication_state {
-    Master(_, _) as m -> {
+    Master(_, _, _, _) as m -> {
       let owner = process.subject_owner(subject)
       let subjects_registry = dict.insert(m.subjects_registry, owner, subject)
       let replication_state = Master(..m, subjects_registry:)
@@ -367,13 +425,13 @@ fn handle_psync(
   state: DatabaseState,
 ) -> #(resp.Resp, DatabaseState) {
   let replication_state = case state.replication_state {
-    Master(subjects_registry, slaves) -> {
+    Master(subjects_registry, slaves, master_offset, wait_state) -> {
       let pid = process.subject_owner(sender)
       let new_slaves = case dict.get(subjects_registry, pid) {
         Ok(subject) -> [subject, ..slaves]
         Error(_) -> slaves
       }
-      Master(subjects_registry:, slaves: new_slaves)
+      Master(subjects_registry:, slaves: new_slaves, master_offset:, wait_state:)
     }
     Slave(master_host, master_port) -> Slave(master_host, master_port)
   }
@@ -382,17 +440,6 @@ fn handle_psync(
     resp.SimpleString(bit_array.from_string(
       "FULLRESYNC " <> default_repl_id <> " 0",
     ))
-  #(response, state)
-}
-
-fn handle_get_replica_count(
-  state: DatabaseState,
-) -> #(resp.Resp, DatabaseState) {
-  let count = case state.replication_state {
-    Master(_, slaves) -> list.length(slaves)
-    Slave(_, _) -> 0
-  }
-  let response = resp.Integer(count)
   #(response, state)
 }
 
@@ -420,6 +467,164 @@ fn queue_for_replication(
   }
 }
 
+fn handle_ack(
+  pid: process.Pid,
+  offset: Int,
+  state: DatabaseState,
+) -> #(resp.Resp, DatabaseState) {
+  io.println(
+    "handle_ack: received ACK from PID with offset " <> int.to_string(offset),
+  )
+  case state.replication_state {
+    Master(registry, slaves, master_offset, wait_state) -> {
+      case wait_state {
+        option.Some(wait) -> {
+          io.println(
+            "handle_ack: active WAIT with target offset "
+            <> int.to_string(wait.target_offset),
+          )
+          // Update ACKs received
+          let new_acks = dict.insert(wait.acks_received, pid, offset)
+          io.println(
+            "handle_ack: now have " <> int.to_string(dict.size(new_acks)) <> " ACKs",
+          )
+          let new_wait = WaitState(..wait, acks_received: new_acks)
+          let new_repl =
+            Master(registry, slaves, master_offset, option.Some(new_wait))
+          let new_state = DatabaseState(..state, replication_state: new_repl)
+          #(resp.SimpleString(<<"OK">>), new_state)
+        }
+        option.None -> {
+          io.println("handle_ack: no active WAIT, ignoring ACK")
+          // No active WAIT, just acknowledge
+          #(resp.SimpleString(<<"OK">>), state)
+        }
+      }
+    }
+    Slave(_, _) -> #(resp.SimpleString(<<"OK">>), state)
+  }
+}
+
+fn handle_start_wait(
+  numreplicas: Int,
+  _timeout: Int,
+  state: DatabaseState,
+) -> #(resp.Resp, DatabaseState) {
+  // Flush any pending replication commands first
+  let state = flush_replication_queue(state)
+
+  case state.replication_state {
+    Master(registry, slaves, master_offset, _) -> {
+      // Check if any bytes have been sent
+      case master_offset {
+        0 -> {
+          // No writes yet, all replicas are in sync
+          let count = list.length(slaves)
+          #(resp.Integer(count), state)
+        }
+        _ -> {
+          // Send GETACK to all replicas
+          send_getack_to_slaves(slaves)
+
+          // Initialize wait state
+          let wait_state =
+            WaitState(
+              target_offset: master_offset,
+              numreplicas:,
+              acks_received: dict.new(),
+              wait_start: timestamp.system_time(),
+            )
+          let new_repl =
+            Master(registry, slaves, master_offset, option.Some(wait_state))
+          let new_state = DatabaseState(..state, replication_state: new_repl)
+
+          // Return a placeholder - the actual response comes from CheckWaitProgress
+          #(resp.SimpleString(<<"WAITING">>), new_state)
+        }
+      }
+    }
+    Slave(_, _) -> #(resp.Integer(0), state)
+  }
+}
+
+fn handle_check_wait_progress(
+  numreplicas: Int,
+  state: DatabaseState,
+) -> #(resp.Resp, DatabaseState) {
+  case state.replication_state {
+    Master(registry, slaves, master_offset, wait_state) -> {
+      case wait_state {
+        option.Some(wait) -> {
+          let in_sync_count = count_in_sync_replicas(wait)
+          io.println(
+            "check_wait_progress: "
+            <> int.to_string(in_sync_count)
+            <> " in sync, need "
+            <> int.to_string(numreplicas),
+          )
+          case in_sync_count >= numreplicas {
+            True -> {
+              io.println("check_wait_progress: COMPLETE, returning count")
+              // Enough replicas acknowledged - clear wait state
+              let new_repl =
+                Master(registry, slaves, master_offset, option.None)
+              let new_state = DatabaseState(..state, replication_state: new_repl)
+              #(resp.Integer(in_sync_count), new_state)
+            }
+            False -> {
+              io.println("check_wait_progress: still waiting")
+              // Still waiting
+              #(resp.SimpleString(<<"IN_PROGRESS">>), state)
+            }
+          }
+        }
+        option.None -> {
+          io.println("check_wait_progress: no active WAIT, returning 0")
+          // No active wait - shouldn't happen, but return 0
+          #(resp.Integer(0), state)
+        }
+      }
+    }
+    Slave(_, _) -> #(resp.Integer(0), state)
+  }
+}
+
+fn handle_get_wait_count(
+  state: DatabaseState,
+) -> #(resp.Resp, DatabaseState) {
+  // Return current count and clear wait_state
+  case state.replication_state {
+    Master(registry, slaves, master_offset, wait_state) -> {
+      case wait_state {
+        option.Some(wait) -> {
+          let count = count_in_sync_replicas(wait)
+          io.println(
+            "get_wait_count: returning " <> int.to_string(count) <> " and clearing wait_state",
+          )
+          // Clear wait_state since we're returning the final count
+          let new_repl = Master(registry, slaves, master_offset, option.None)
+          let new_state = DatabaseState(..state, replication_state: new_repl)
+          #(resp.Integer(count), new_state)
+        }
+        option.None -> {
+          io.println("get_wait_count: no active WAIT")
+          #(resp.Integer(0), state)
+        }
+      }
+    }
+    Slave(_, _) -> #(resp.Integer(0), state)
+  }
+}
+
+fn count_in_sync_replicas(wait: WaitState) -> Int {
+  dict.fold(wait.acks_received, 0, fn(count, _pid, offset) {
+    case offset >= wait.target_offset {
+      True -> count + 1
+      False -> count
+    }
+  })
+}
+
 // Flush the replication queue to all slaves
 fn flush_replication_queue(state: DatabaseState) -> DatabaseState {
   case state.replication_queue.queue {
@@ -429,16 +634,25 @@ fn flush_replication_queue(state: DatabaseState) -> DatabaseState {
       // Reverse to get correct order (we prepended)
       let commands = list.reverse(queue)
       let combined = bit_array.concat(commands)
+      let bytes_sent = bit_array.byte_size(combined)
 
-      // Send to all slaves
-      case state.replication_state {
-        Master(_, slaves) -> send_payload_to_slaves(slaves, combined)
-        Slave(_, _) -> Nil
+      // Send to all slaves and update offset
+      let new_replication_state = case state.replication_state {
+        Master(registry, slaves, offset, wait) -> {
+          send_payload_to_slaves(slaves, combined)
+          // Update master offset
+          Master(registry, slaves, offset + bytes_sent, wait)
+        }
+        Slave(host, port) -> Slave(host, port)
       }
 
       // Reset queue
       let replication_queue = ReplicationQueue([], timestamp.system_time())
-      DatabaseState(..state, replication_queue:)
+      DatabaseState(
+        ..state,
+        replication_state: new_replication_state,
+        replication_queue:,
+      )
     }
   }
 }
@@ -487,7 +701,7 @@ fn command_to_propagation_payload_internal(
 
 fn send_rdb_to_slave(state: DatabaseState, sender: Subject(resp.Resp)) {
   case state.replication_state {
-    Master(subjects_registry, _) -> {
+    Master(subjects_registry, _, _, _) -> {
       let pid = process.subject_owner(sender)
       let stream_subject = dict.get(subjects_registry, pid)
       let playload = <<"$88\r\n":utf8, empty_rdb_hex:size({ 88 * 8 })>>
@@ -504,4 +718,16 @@ fn send_payload_to_slaves(
   payload: BitArray,
 ) {
   list.each(slaves, fn(slave) { process.send(slave, payload) })
+}
+
+fn send_getack_to_slaves(slaves: List(process.Subject(BitArray))) -> Nil {
+  let getack_payload =
+    resp.Array([
+      resp.BulkString(<<"REPLCONF":utf8>>),
+      resp.BulkString(<<"GETACK":utf8>>),
+      resp.BulkString(<<"*":utf8>>),
+    ])
+    |> resp.to_bit_array()
+
+  list.each(slaves, fn(slave) { process.send(slave, getack_payload) })
 }

@@ -72,22 +72,42 @@ fn config_decoder() {
 
 fn handle_message(msg, db, conn) {
   io.println("Received message!")
-  let response = case msg {
+
+  case msg {
     glisten.Packet(msg) -> {
       io.println("Received packet")
-      resp.from_bit_array(msg)
-      |> result.map(command.parse)
-      |> result.map_error(resp.SimpleError)
-      |> result.flatten()
-      |> result.map(database.handle_command(db, _))
-      |> result.unwrap_both()
-      |> resp.to_bit_array()
+
+      // Parse the command
+      let result =
+        resp.from_bit_array(msg)
+        |> result.map(command.parse)
+        |> result.map_error(resp.SimpleError)
+        |> result.flatten()
+
+      // Check if it's an ACK - handle silently without response
+      case result {
+        Ok(command.ReplConf(command.ReplConfAck(offset))) -> {
+          let pid = process.self()
+          let _ = database.handle_ack_from_replica(db, pid, offset)
+          actor.continue(db)
+        }
+        _ -> {
+          // Normal command or error - send response
+          let response =
+            result
+            |> result.map(database.handle_command(db, _))
+            |> result.unwrap_both()
+            |> resp.to_bit_array()
+          let assert Ok(_) =
+            glisten.send(conn, response |> bytes_tree.from_bit_array)
+          actor.continue(db)
+        }
+      }
     }
     glisten.User(stream) -> {
       io.println("Received stream")
-      stream
+      let assert Ok(_) = glisten.send(conn, stream |> bytes_tree.from_bit_array)
+      actor.continue(db)
     }
   }
-  let assert Ok(_) = glisten.send(conn, response |> bytes_tree.from_bit_array)
-  actor.continue(db)
 }

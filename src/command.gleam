@@ -5,6 +5,12 @@ import gleam/result
 import gleam/string
 import resp.{type Resp}
 
+pub type ReplConfCommand {
+  ReplConfGeneric(args: List(Resp))
+  ReplConfAck(offset: Int)
+  ReplConfGetAck
+}
+
 pub type Command {
   Ping
   Echo(Resp)
@@ -14,7 +20,7 @@ pub type Command {
   GetConfigDbFileName
   Keys
   InfoReplication
-  ReplConf(args: List(Resp))
+  ReplConf(command: ReplConfCommand)
   Psync
   Wait(numreplicas: Int, timeout: Int)
 }
@@ -83,7 +89,12 @@ pub fn parse(input: Resp) -> Result(Command, resp.Resp) {
       }
     }
     "keys", _ -> Ok(Keys)
-    "replconf", args -> Ok(ReplConf(args))
+    "replconf", args -> {
+      case parse_replconf(args) {
+        Ok(replconf_cmd) -> Ok(ReplConf(replconf_cmd))
+        Error(e) -> Error(e)
+      }
+    }
     "psync", _ -> Ok(Psync)
     "wait", [resp.BulkString(numreplicas_bytes), resp.BulkString(timeout_bytes)] -> {
       use numreplicas <- result.try(
@@ -128,5 +139,29 @@ fn parse_config_command(
       }
     }
     _, _ -> Error(resp.SimpleError(<<"Unknown config command">>))
+  }
+}
+
+fn parse_replconf(args: List(resp.Resp)) -> Result(ReplConfCommand, resp.Resp) {
+  case args {
+    [resp.BulkString(cmd), resp.BulkString(val)] -> {
+      case bit_array.to_string(cmd) {
+        Ok(cmd_str) -> {
+          case string.lowercase(cmd_str) {
+            "ack" -> {
+              case bit_array.to_string(val) |> result.try(int.parse) {
+                Ok(offset) -> Ok(ReplConfAck(offset))
+                Error(_) ->
+                  Error(resp.SimpleError(<<"Expected valid integer for ACK offset">>))
+              }
+            }
+            "getack" -> Ok(ReplConfGetAck)
+            _ -> Ok(ReplConfGeneric(args))
+          }
+        }
+        Error(_) -> Ok(ReplConfGeneric(args))
+      }
+    }
+    _ -> Ok(ReplConfGeneric(args))
   }
 }

@@ -6,8 +6,6 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option
-import gleam/result
-import gleam/string
 import mug
 import resp
 
@@ -218,16 +216,7 @@ fn process_buffer(
 /// Check if a command is REPLCONF GETACK
 fn is_replconf_getack(cmd: command.Command) -> Bool {
   case cmd {
-    command.ReplConf(args) -> {
-      case args {
-        [resp.BulkString(arg1), resp.BulkString(arg2)] -> {
-          let arg1_str = bit_array.to_string(arg1) |> result.unwrap("")
-          let arg2_str = bit_array.to_string(arg2) |> result.unwrap("")
-          string.lowercase(arg1_str) == "getack" && arg2_str == "*"
-        }
-        _ -> False
-      }
-    }
+    command.ReplConf(command.ReplConfGetAck) -> True
     _ -> False
   }
 }
