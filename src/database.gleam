@@ -554,6 +554,7 @@ fn handle_check_wait_progress(
           case in_sync_count >= numreplicas {
             True -> {
               // Enough replicas acknowledged - clear wait state
+              process.send(wait.response_channel, in_sync_count)
               let new_repl =
                 Master(registry, slaves, master_offset, option.None)
               let new_state =
@@ -583,9 +584,11 @@ fn handle_get_wait_count(state: DatabaseState) -> #(resp.Resp, DatabaseState) {
       case wait_state {
         option.Some(wait) -> {
           let count = count_in_sync_replicas(wait)
+          process.send(wait.response_channel, count)
           // Clear wait_state since we're returning the final count
-          let new_repl = Master(registry, slaves, master_offset, option.None)
-          let new_state = DatabaseState(..state, replication_state: new_repl)
+          let replication_state =
+            Master(registry, slaves, master_offset, option.None)
+          let new_state = DatabaseState(..state, replication_state:)
           #(resp.Integer(count), new_state)
         }
         option.None -> {
