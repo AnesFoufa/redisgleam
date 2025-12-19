@@ -87,7 +87,15 @@ pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
     command.ReplConf(_args) -> resp.SimpleString(<<"OK">>)
     command.Psync -> psync(db)
     command.Keys -> keys(db)
+    command.Wait(_numreplicas, _timeout) -> wait(db)
   }
+}
+
+fn wait(db: Database) -> Resp {
+  // For now, return 0 (simple case: 0 replicas needed, 0 replicas connected)
+  // TODO: Track number of replicas and wait for ACKs in future stages
+  let _ = db
+  resp.Integer(0)
 }
 
 /// Apply a command silently (no response). Used for processing propagated commands from master.

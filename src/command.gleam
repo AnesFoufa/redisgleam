@@ -16,6 +16,7 @@ pub type Command {
   InfoReplication
   ReplConf(args: List(Resp))
   Psync
+  Wait(numreplicas: Int, timeout: Int)
 }
 
 pub fn parse(input: Resp) -> Result(Command, resp.Resp) {
@@ -84,6 +85,25 @@ pub fn parse(input: Resp) -> Result(Command, resp.Resp) {
     "keys", _ -> Ok(Keys)
     "replconf", args -> Ok(ReplConf(args))
     "psync", _ -> Ok(Psync)
+    "wait", [resp.BulkString(numreplicas_bytes), resp.BulkString(timeout_bytes)] -> {
+      use numreplicas <- result.try(
+        numreplicas_bytes
+        |> bit_array.to_string()
+        |> result.try(int.parse)
+        |> result.replace_error(
+          resp.SimpleError(<<"Expected valid integer for numreplicas">>),
+        ),
+      )
+      use timeout <- result.try(
+        timeout_bytes
+        |> bit_array.to_string()
+        |> result.try(int.parse)
+        |> result.replace_error(
+          resp.SimpleError(<<"Expected valid integer for timeout">>),
+        ),
+      )
+      Ok(Wait(numreplicas, timeout))
+    }
     _, _ -> Error(resp.SimpleError(<<"Unknown command">>))
   }
 }
