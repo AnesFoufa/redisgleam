@@ -93,8 +93,12 @@ pub fn handle_command(db: Database, cmd: command.Command) -> Resp {
 
 fn wait(db: Database, numreplicas: Int, timeout: Int) -> Resp {
   // Start the WAIT request
+  let response_channel = process.new_subject()
   let response =
-    process.call_forever(db.inner, message(StartWait(numreplicas, timeout)))
+    process.call_forever(
+      db.inner,
+      message(StartWait(numreplicas, timeout, response_channel:)),
+    )
 
   case response {
     // If master offset is 0, we got the final count immediately
@@ -104,12 +108,7 @@ fn wait(db: Database, numreplicas: Int, timeout: Int) -> Resp {
   }
 }
 
-fn wait_loop(
-  db: Database,
-  numreplicas: Int,
-  timeout: Int,
-  elapsed: Int,
-) -> Resp {
+fn wait_loop(db: Database, numreplicas: Int, timeout: Int, elapsed: Int) -> Resp {
   // Check if timeout expired
   case elapsed >= timeout {
     True -> {
@@ -119,10 +118,7 @@ fn wait_loop(
     False -> {
       // Check current progress
       let result =
-        process.call_forever(
-          db.inner,
-          message(CheckWaitProgress(numreplicas)),
-        )
+        process.call_forever(db.inner, message(CheckWaitProgress(numreplicas)))
       case result {
         resp.Integer(_) -> result
         // Still waiting
@@ -162,7 +158,11 @@ pub fn register(db: Database, subject) {
   process.call_forever(db.inner, message(Register(subject)))
 }
 
-pub fn handle_ack_from_replica(db: Database, pid: process.Pid, offset: Int) -> Resp {
+pub fn handle_ack_from_replica(
+  db: Database,
+  pid: process.Pid,
+  offset: Int,
+) -> Resp {
   process.call_forever(db.inner, message(HandleAck(pid, offset)))
 }
 
@@ -219,6 +219,7 @@ type WaitState {
     numreplicas: Int,
     acks_received: dict.Dict(process.Pid, Int),
     wait_start: timestamp.Timestamp,
+    response_channel: process.Subject(Int),
   )
 }
 
@@ -301,7 +302,11 @@ type Command {
   Register(subject: process.Subject(BitArray))
   Psync
   HandleAck(pid: process.Pid, offset: Int)
-  StartWait(numreplicas: Int, timeout: Int)
+  StartWait(
+    numreplicas: Int,
+    timeout: Int,
+    response_channel: process.Subject(Int),
+  )
   CheckWaitProgress(numreplicas: Int)
   GetWaitCount
 }
@@ -323,8 +328,8 @@ fn message_handler(message: Message, state: DatabaseState) {
         Register(subject) -> handle_register(subject, state)
         Psync -> handle_psync(sender, state)
         HandleAck(pid, offset) -> handle_ack(pid, offset, state)
-        StartWait(numreplicas, timeout) ->
-          handle_start_wait(numreplicas, timeout, state)
+        StartWait(numreplicas, timeout, response_channel) ->
+          handle_start_wait(numreplicas, timeout, state, response_channel)
         CheckWaitProgress(numreplicas) ->
           handle_check_wait_progress(numreplicas, state)
         GetWaitCount -> handle_get_wait_count(state)
@@ -425,7 +430,12 @@ fn handle_psync(
         Ok(subject) -> [subject, ..slaves]
         Error(_) -> slaves
       }
-      Master(subjects_registry:, slaves: new_slaves, master_offset:, wait_state:)
+      Master(
+        subjects_registry:,
+        slaves: new_slaves,
+        master_offset:,
+        wait_state:,
+      )
     }
     Slave(master_host, master_port) -> Slave(master_host, master_port)
   }
@@ -492,6 +502,7 @@ fn handle_start_wait(
   numreplicas: Int,
   _timeout: Int,
   state: DatabaseState,
+  response_channel: process.Subject(Int),
 ) -> #(resp.Resp, DatabaseState) {
   // Flush any pending replication commands first
   let state = flush_replication_queue(state)
@@ -516,10 +527,11 @@ fn handle_start_wait(
               numreplicas:,
               acks_received: dict.new(),
               wait_start: timestamp.system_time(),
+              response_channel:,
             )
-          let new_repl =
+          let replication_state =
             Master(registry, slaves, master_offset, option.Some(wait_state))
-          let new_state = DatabaseState(..state, replication_state: new_repl)
+          let new_state = DatabaseState(..state, replication_state:)
 
           // Return a placeholder - the actual response comes from CheckWaitProgress
           #(resp.SimpleString(<<"WAITING">>), new_state)
@@ -544,7 +556,8 @@ fn handle_check_wait_progress(
               // Enough replicas acknowledged - clear wait state
               let new_repl =
                 Master(registry, slaves, master_offset, option.None)
-              let new_state = DatabaseState(..state, replication_state: new_repl)
+              let new_state =
+                DatabaseState(..state, replication_state: new_repl)
               #(resp.Integer(in_sync_count), new_state)
             }
             False -> {
@@ -563,9 +576,7 @@ fn handle_check_wait_progress(
   }
 }
 
-fn handle_get_wait_count(
-  state: DatabaseState,
-) -> #(resp.Resp, DatabaseState) {
+fn handle_get_wait_count(state: DatabaseState) -> #(resp.Resp, DatabaseState) {
   // Return current count and clear wait_state
   case state.replication_state {
     Master(registry, slaves, master_offset, wait_state) -> {
