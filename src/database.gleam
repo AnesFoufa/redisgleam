@@ -162,8 +162,9 @@ fn wait(db: Database, numreplicas: Int, timeout: Int) -> Resp {
           resp.Integer(count)
         }
         Ok(option.None) | Error(Nil) -> {
-          // Timeout expired - get current count
-          process.call_forever(db.inner, message(GetWaitCount))
+          // Timeout expired - get current count for this client
+          let client_pid = process.subject_owner(response_channel)
+          process.call_forever(db.inner, message(GetWaitCount(client_pid)))
         }
       }
     }
@@ -270,13 +271,13 @@ type ReplicationState {
   Master(
     replicas: dict.Dict(process.Pid, ReplicaConnection),
     master_offset: Int,
-    wait_state: option.Option(WaitState),
+    wait_requests: dict.Dict(process.Pid, WaitState),
   )
   Slave(master_host: String, master_port: Int)
 }
 
 fn master() -> ReplicationState {
-  Master(dict.new(), 0, option.None)
+  Master(dict.new(), 0, dict.new())
 }
 
 type ReplicationQueue {
@@ -345,7 +346,7 @@ type Command {
   Psync
   HandleAck(pid: process.Pid, offset: Int)
   StartWait(numreplicas: Int, response_channel: process.Subject(Int))
-  GetWaitCount
+  GetWaitCount(client_pid: process.Pid)
 }
 
 type AsyncCommand {
@@ -367,7 +368,7 @@ fn message_handler(message: Message, state: DatabaseState) {
         HandleAck(pid, offset) -> handle_ack(pid, offset, state)
         StartWait(numreplicas, response_channel) ->
           handle_start_wait(numreplicas, state, response_channel)
-        GetWaitCount -> handle_get_wait_count(state)
+        GetWaitCount(client_pid) -> handle_get_wait_count(client_pid, state)
       }
       process.send(sender, response)
 
@@ -458,9 +459,9 @@ fn handle_register(
 
 fn handle_psync(state: DatabaseState) -> #(resp.Resp, DatabaseState) {
   let replication_state = case state.replication_state {
-    Master(replicas, master_offset, wait_state) -> {
+    Master(replicas, master_offset, wait_requests) -> {
       // Replicas already populated by handle_register, just pass through
-      Master(replicas:, master_offset:, wait_state:)
+      Master(replicas:, master_offset:, wait_requests:)
     }
     Slave(master_host, master_port) -> Slave(master_host, master_port)
   }
@@ -502,7 +503,7 @@ fn handle_ack(
   state: DatabaseState,
 ) -> #(resp.Resp, DatabaseState) {
   case state.replication_state {
-    Master(replicas, master_offset, wait_state) -> {
+    Master(replicas, master_offset, wait_requests) -> {
       // Update last_ack_offset in replicas dict
       let replicas = case dict.get(replicas, pid) {
         Ok(replica) -> {
@@ -512,26 +513,20 @@ fn handle_ack(
         Error(_) -> replicas
       }
 
-      case wait_state {
-        option.Some(wait) -> {
-          // Update ACKs received for WAIT tracking
+      // Update ACKs received for ALL active WAIT requests
+      let wait_requests =
+        dict.map_values(wait_requests, fn(_client_pid, wait) {
           let new_acks = dict.insert(wait.acks_received, pid, offset)
-          let new_wait = WaitState(..wait, acks_received: new_acks)
-          let new_repl = Master(replicas, master_offset, option.Some(new_wait))
-          let new_state = DatabaseState(..state, replication_state: new_repl)
+          WaitState(..wait, acks_received: new_acks)
+        })
 
-          // Check and notify immediately if threshold is met
-          let new_state = check_and_notify_wait_if_ready(new_state)
+      let new_repl = Master(replicas, master_offset, wait_requests)
+      let new_state = DatabaseState(..state, replication_state: new_repl)
 
-          #(resp.SimpleString(<<"OK">>), new_state)
-        }
-        option.None -> {
-          // No active WAIT, but still update replicas
-          let new_repl = Master(replicas, master_offset, option.None)
-          let new_state = DatabaseState(..state, replication_state: new_repl)
-          #(resp.SimpleString(<<"OK">>), new_state)
-        }
-      }
+      // Check and notify all waits that are ready
+      let new_state = check_and_notify_all_waits(new_state)
+
+      #(resp.SimpleString(<<"OK">>), new_state)
     }
     Slave(_, _) -> #(resp.SimpleString(<<"OK">>), state)
   }
@@ -546,7 +541,7 @@ fn handle_start_wait(
   let state = flush_replication_queue(state)
 
   case state.replication_state {
-    Master(replicas, master_offset, _) -> {
+    Master(replicas, master_offset, wait_requests) -> {
       // Check if any bytes have been sent
       case master_offset {
         0 -> {
@@ -560,7 +555,10 @@ fn handle_start_wait(
           // Send GETACK to all replicas
           send_getack_to_slaves(replicas)
 
-          // Initialize wait state
+          // Get Pid of the calling process (owner of response_channel)
+          let client_pid = process.subject_owner(response_channel)
+
+          // Initialize wait state for this client
           let wait_state =
             WaitState(
               target_offset: master_offset,
@@ -568,8 +566,10 @@ fn handle_start_wait(
               acks_received: dict.new(),
               response_channel:,
             )
-          let replication_state =
-            Master(replicas, master_offset, option.Some(wait_state))
+
+          // Add to wait_requests dict
+          let wait_requests = dict.insert(wait_requests, client_pid, wait_state)
+          let replication_state = Master(replicas, master_offset, wait_requests)
           let new_state = DatabaseState(..state, replication_state:)
 
           // Return placeholder - actual response comes via response_channel when ACKs arrive
@@ -585,20 +585,25 @@ fn handle_start_wait(
   }
 }
 
-fn handle_get_wait_count(state: DatabaseState) -> #(resp.Resp, DatabaseState) {
-  // Return current count and clear wait_state
+fn handle_get_wait_count(
+  client_pid: process.Pid,
+  state: DatabaseState,
+) -> #(resp.Resp, DatabaseState) {
+  // Return current count for specific client and remove from wait_requests
   case state.replication_state {
-    Master(replicas, master_offset, wait_state) -> {
-      case wait_state {
-        option.Some(wait) -> {
+    Master(replicas, master_offset, wait_requests) -> {
+      case dict.get(wait_requests, client_pid) {
+        Ok(wait) -> {
           let count = count_in_sync_replicas(wait)
           process.send(wait.response_channel, count)
-          // Clear wait_state since we're returning the final count
-          let replication_state = Master(replicas, master_offset, option.None)
+          // Remove this wait from the dict since timeout expired
+          let wait_requests = dict.delete(wait_requests, client_pid)
+          let replication_state = Master(replicas, master_offset, wait_requests)
           let new_state = DatabaseState(..state, replication_state:)
           #(resp.Integer(count), new_state)
         }
-        option.None -> {
+        Error(_) -> {
+          // Wait not found (already completed or never existed)
           #(resp.Integer(0), state)
         }
       }
@@ -616,27 +621,32 @@ fn count_in_sync_replicas(wait: WaitState) -> Int {
   })
 }
 
-fn check_and_notify_wait_if_ready(state: DatabaseState) -> DatabaseState {
+fn check_and_notify_all_waits(state: DatabaseState) -> DatabaseState {
   case state.replication_state {
-    Master(replicas, master_offset, wait_state) -> {
-      case wait_state {
-        option.Some(wait) -> {
+    Master(replicas, master_offset, wait_requests) -> {
+      // Check each wait request and collect those that are ready
+      let #(_completed_pids, remaining_waits) =
+        dict.fold(wait_requests, #([], dict.new()), fn(acc, client_pid, wait) {
+          let #(completed, remaining) = acc
           let in_sync_count = count_in_sync_replicas(wait)
 
           case in_sync_count >= wait.numreplicas {
             True -> {
-              // Notify immediately!
+              // Notify this client
               process.send(wait.response_channel, in_sync_count)
-
-              // Clear wait state
-              let new_repl = Master(replicas, master_offset, option.None)
-              DatabaseState(..state, replication_state: new_repl)
+              // Add to completed list, don't add to remaining
+              #([client_pid, ..completed], remaining)
             }
-            False -> state
+            False -> {
+              // Keep waiting
+              #(completed, dict.insert(remaining, client_pid, wait))
+            }
           }
-        }
-        option.None -> state
-      }
+        })
+
+      // Update state with remaining waits
+      let new_repl = Master(replicas, master_offset, remaining_waits)
+      DatabaseState(..state, replication_state: new_repl)
     }
     Slave(_, _) -> state
   }
